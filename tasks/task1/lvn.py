@@ -47,6 +47,7 @@ def t_lvn_single(block):
                 # print(args)
 
                 # construct value
+                args.sort()
                 value = inst['op'] + ' ' + ' '.join(args)
                 # print(value)
 
