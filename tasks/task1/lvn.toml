@@ -1,0 +1,17 @@
+# which benchmarks to run
+benchmarks = '../../examples/test/lvn/*.bril'
+# how to extract the performance metric from stderr
+extract = 'total_dyn_inst: (\d+)'
+
+[runs.baseline]
+pipeline = [
+  "bril2json",
+  "brili -p",
+]
+
+[runs.lvn]
+pipeline = [
+  "bril2json",
+  "python lvn.py",
+  "brili -p",
+]
