@@ -2,6 +2,8 @@ import json
 import sys
 from block_gen import block_gen
 
+COMMUTATIVE_OPS = ['add', 'mul', 'sub', 'eq']
+
 def str2bool(arg):
     if arg == 'true':
         return True
@@ -92,7 +94,8 @@ def t_lvn_single(block):
                         inst['value'] = value
                     value = 'const ' + str(value)
                 else:
-                    args.sort()
+                    if inst['op'] in COMMUTATIVE_OPS:
+                        args.sort()
                     value = inst['op'] + ' ' + ' '.join(args)
                 # print(value)
 
