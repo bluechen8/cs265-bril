@@ -12,7 +12,7 @@ def block_gen(fn):
     label2succ = {}
     blocks_cfg = []
     cur_block = []
-    cur_block_cfg = {'pred': [], 'succ': []}
+    cur_block_cfg = {'pred': [], 'succ': [], 'touch': 0, 'in': [], 'out': []}
     # iterate inst
     for instr in fn["instrs"]:
         if 'op' in instr:
@@ -35,7 +35,7 @@ def block_gen(fn):
                 cur_block.append(instr)
                 blocks.append(cur_block)
                 blocks_cfg.append(cur_block_cfg)
-                cur_block_cfg = {'pred': [], 'succ': []}
+                cur_block_cfg = {'pred': [], 'succ': [], 'touch': 0, 'in': [], 'out': []}
                 cur_block = []
                 block_idx += 1
             else:
@@ -49,7 +49,7 @@ def block_gen(fn):
                 blocks_cfg.append(cur_block_cfg)
                 blocks.append(cur_block)
 
-                cur_block_cfg = {'pred': [block_idx], 'succ': []}
+                cur_block_cfg = {'pred': [block_idx], 'succ': [], 'touch': 0, 'in': [], 'out': []}
                 cur_block = [instr]
                 block_idx += 1
             else:

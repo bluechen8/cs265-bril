@@ -10,6 +10,17 @@ def str2bool(arg):
     else:
         exit(f"Unknown boolean value {arg}")
 
+def merge_dicts(dicts):
+    if len(dicts) == 0:
+        return {}
+    # print(dicts)
+    common_items = set(dicts[0].items())
+    # print(common_items)
+    for d in dicts[1:]:
+        common_items &= set(d.items())
+    # print(common_items)
+    return dict(common_items)
+
 # trivial constant propagation/folding for one block
 def t_cpf_single(block, dest2val):
     # iterate inst in one local block
@@ -40,7 +51,7 @@ def t_cpf_single(block, dest2val):
             # print(args)
             # construct value
             value = 0
-            if all_const_flag:
+            if all_const_flag and dest is not None:
                 const_value_flag = True
                 match inst['op']:
                     case 'const':
@@ -106,16 +117,36 @@ def t_cpf_single(block, dest2val):
                 inst['value'] = value
                 dest2val[dest] = value
 
-    return block                
+    return block, dest2val        
 
 # trivial constant propagation/folding
 def t_cpf(fn):
     # interate blocks
     blocks, blocks_cfg = block_gen(fn)
-    for block_id in range(len(blocks)):
+    # initialize in and out table
+    for block in blocks_cfg:
+        for _ in range(len(block['pred'])):
+            block['in'].append({})
+        block['out'].append({})
+    # initialize worklist
+    worklist = [0]
+    update_flag = True
+    while len(worklist) > 0:
+        block_id = worklist.pop()
         # print(f"-----Block {block_id}-----")
-        dest2val = {}
-        blocks[block_id] = t_cpf_single(blocks[block_id], dest2val)
+        blocks[block_id], dest2val = t_cpf_single(blocks[block_id], merge_dicts(blocks_cfg[block_id]['in']))
+        blocks_cfg[block_id]['touch'] += 1
+        # if out changed, update succ
+        if dest2val != blocks_cfg[block_id]['out'][0]:
+            for succ_id in blocks_cfg[block_id]['succ']:
+                if succ_id not in worklist:
+                    worklist.append(succ_id)
+                blocks_cfg[succ_id]['in'][blocks_cfg[succ_id]['pred'].index(block_id)] = dest2val
+        else:
+            # if succ has not been touched, add to worklist
+            for succ_id in blocks_cfg[block_id]['succ']:
+                if succ_id not in worklist and blocks_cfg[succ_id]['touch'] == 0:
+                    worklist.append(succ_id)
     fn["instrs"] = [inst for block in blocks for inst in block]
 
 if __name__ == "__main__":
@@ -126,3 +157,12 @@ if __name__ == "__main__":
 
     # Output the program
     json.dump(prog, sys.stdout, indent=2)
+
+    # test merge
+    # d1 = {'a': 1, 'b': 2, 'c': 3}
+    # d2 = {'a': 12, 'b': 2, 'c': 3}
+    # d3 = {'a': 1, 'b': 2, 'c': 33}
+    # d1 = {}
+    # d2 = {}
+    # d3 = {}
+    # print(merge_dicts([d1, d2, d3]))
