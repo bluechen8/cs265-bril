@@ -1,5 +1,6 @@
 import json
 import sys
+import copy
 from block_gen import block_gen
 
 def str2bool(arg):
@@ -145,18 +146,21 @@ def t_cpf(fn):
         blocks_cfg[block_id]['touch'] += 1
         # if out changed, update succ
         if dest2val != blocks_cfg[block_id]['out'][0]:
+            # print(f"not equal {dest2val} {blocks_cfg[block_id]['out'][0]}")
             for succ_id in blocks_cfg[block_id]['succ']:
                 if succ_id not in worklist:
                     worklist.append(succ_id)
                 blocks_cfg[succ_id]['in'][blocks_cfg[succ_id]['pred'].index(block_id)] = dest2val
+            blocks_cfg[block_id]['out'][0] = dest2val
         else:
             # if succ has not been touched, add to worklist
             for succ_id in blocks_cfg[block_id]['succ']:
                 if succ_id not in worklist and blocks_cfg[succ_id]['touch'] == 0:
                     worklist.append(succ_id)
-        print(block_id)
-        print(dest2val)
-        print(worklist)
+        # print(block_id)
+        # print(dest2val)
+        # print(worklist)
+        # print('-------------------------')
     fn["instrs"] = [inst for block in blocks for inst in block]
 
 # trivial live variable analysis for one block
@@ -225,22 +229,29 @@ def t_lva(block):
         used_set = t_lva_single(blocks[block_id], union_sets(blocks_cfg[block_id]['out']))
         blocks_cfg[block_id]['touch'] += 1
         # if in changed, update pred
-        if union_sets != blocks_cfg[block_id]['in'][0]:
+        if used_set != blocks_cfg[block_id]['in'][0]:
+            # print(f"not equal {used_set} {blocks_cfg[block_id]['in'][0]}")
             for pred_id in blocks_cfg[block_id]['pred']:
                 if pred_id not in worklist:
                     worklist.append(pred_id)
                 blocks_cfg[pred_id]['out'][blocks_cfg[pred_id]['succ'].index(block_id)] = used_set
+            blocks_cfg[block_id]['in'][0] = used_set
         else:
             # if pred has not been touched, add to worklist
             for pred_id in blocks_cfg[block_id]['pred']:
                 if pred_id not in worklist and blocks_cfg[pred_id]['touch'] == 0:
                     worklist.append(pred_id)
 
+        # print(block_id)
+        # print(used_set)
+        # print(worklist)
+        # print('-------------------------')
+
     # local dead code elimination
     for block_id in range(len(blocks)):
         # call l_dce_single until no more unused variables
         while True:
-            used_set = set() if len(blocks_cfg[block_id]['out']) == 0 else blocks_cfg[block_id]['out'][0]
+            used_set = set() if len(blocks_cfg[block_id]['out']) == 0 else copy.deepcopy(blocks_cfg[block_id]['out'][0])
             # print(f"-----Block {block_id}-----")
             # print('out:')
             # for cur_set in blocks_cfg[block_id]['out']:
@@ -262,8 +273,9 @@ if __name__ == "__main__":
     for fn in prog["functions"]:
         t_cpf(fn)
 
-    # for fn in prog["functions"]:
-    #     t_lva(fn)
+    for fn in prog["functions"]:
+        # print(f"-----Function {fn['name']}-----")
+        t_lva(fn)
 
     # Output the program
     json.dump(prog, sys.stdout, indent=2)
