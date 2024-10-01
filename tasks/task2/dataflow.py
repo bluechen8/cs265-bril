@@ -44,6 +44,10 @@ def t_cpf_single(block, dest2val):
         all_const_flag = True
         const_value_flag = False
 
+        # ignore float
+        if 'type' in inst and inst['type'] == 'float':
+            continue
+
         # ignore labels
         if 'op' in inst and inst['op'] not in BAD_CONST_OPS:
             # print(inst['op'])
