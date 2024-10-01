@@ -77,7 +77,7 @@ if __name__ == "__main__":
     import briltxt
     prog = json.load(sys.stdin)
     for fidx, fn in enumerate(prog["functions"]):
-        print(f"-----Function {fidx}-----")
+        print(f"-----Function {fn['name']}-----")
         blocks, blocks_cfg = block_gen(fn)
         for bidx, block in enumerate(blocks):
             print(f"-----Block {bidx}-----")

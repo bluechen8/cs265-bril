@@ -1,7 +1,10 @@
 import json
 import sys
-import copy
 from block_gen import block_gen
+
+DEBUG = False
+
+BAD_CONST_OPS = ['call']
 
 def str2bool(arg):
     if arg.lower() == 'true':
@@ -27,7 +30,7 @@ def union_sets(sets):
         return set()
     union_items = set()
     for s in sets:
-        union_items.union(s)
+        union_items.update(s)
     return union_items
 
 # trivial constant propagation/folding for one block
@@ -42,7 +45,7 @@ def t_cpf_single(block, dest2val):
         const_value_flag = False
 
         # ignore labels
-        if 'op' in inst:
+        if 'op' in inst and inst['op'] not in BAD_CONST_OPS:
             # print(inst['op'])
             # check if has args
             if 'args' in inst or 'value' in inst:
@@ -57,6 +60,9 @@ def t_cpf_single(block, dest2val):
                         else:
                             all_const_flag = False
                             args.append(arg)
+            else:
+                # pass if no args
+                continue
             # print(args)
             # construct value
             value = 0
@@ -74,7 +80,7 @@ def t_cpf_single(block, dest2val):
                     case 'div':
                         value = int(args[0]) // int(args[1])
                     case 'id':
-                        value = int(args[0])
+                        value = int(args[0]) if inst['type'] == 'int' else str2bool(args[0])
                     case 'and':
                         value = str2bool(args[0]) and str2bool(args[1])
                     case 'or':
@@ -165,19 +171,27 @@ def t_cpf(fn):
 
 # trivial live variable analysis for one block
 def t_lva_single(block, used_set):
+    if DEBUG:
+        print(f"initial used_set: {used_set}")
     # iterate inst in one local block (reverse order)
     for inst_idx in reversed(range(len(block))):
         inst = block[inst_idx]
+        if DEBUG:
+            print(f"[+] inst dut: {inst}")
         # check dest variable
         # new definition -> clear used_set
         dest = inst.get('dest')
         if dest is not None:
             used_set.discard(dest)
+            if DEBUG:
+                print(f"[++] discard {dest}")
         # check args variables
         # args -> used -> add to used_set
         if 'args' in inst:
             for arg in inst['args']:
                 used_set.add(arg)
+                if DEBUG:
+                    print(f"[++] add {arg}")
     return used_set
 
 # trivial local dead code elimination for one block
@@ -225,8 +239,12 @@ def t_lva(block):
     # print(worklist)
     while len(worklist) > 0:
         block_id = worklist.pop()
-        # print(f"-----Block {block_id}-----")
+        if DEBUG:
+            print(f"-----Block {block_id}-----")
+            print(f"out: {blocks_cfg[block_id]['out']}")
         used_set = t_lva_single(blocks[block_id], union_sets(blocks_cfg[block_id]['out']))
+        if DEBUG:
+            print(f"used_set: {used_set}")
         blocks_cfg[block_id]['touch'] += 1
         # if in changed, update pred
         if used_set != blocks_cfg[block_id]['in'][0]:
@@ -241,24 +259,25 @@ def t_lva(block):
             for pred_id in blocks_cfg[block_id]['pred']:
                 if pred_id not in worklist and blocks_cfg[pred_id]['touch'] == 0:
                     worklist.append(pred_id)
-
-        # print(block_id)
-        # print(used_set)
-        # print(worklist)
-        # print('-------------------------')
+        if DEBUG:
+            print(f"worklist: {worklist}")
+            print('-------------------------')
 
     # local dead code elimination
+    if DEBUG:
+        print(f"-----Local Dead Code Elimination-----")
     for block_id in range(len(blocks)):
         # call l_dce_single until no more unused variables
         while True:
-            used_set = set() if len(blocks_cfg[block_id]['out']) == 0 else copy.deepcopy(blocks_cfg[block_id]['out'][0])
-            # print(f"-----Block {block_id}-----")
-            # print('out:')
-            # for cur_set in blocks_cfg[block_id]['out']:
-            #     print(cur_set)
-            # print('in:')
-            # for cur_set in blocks_cfg[block_id]['in']:
-            #     print(cur_set)
+            used_set = set() if len(blocks_cfg[block_id]['out']) == 0 else union_sets(blocks_cfg[block_id]['out'])
+            if DEBUG:
+                print(f"-----Block {block_id}-----")
+                print('out:')
+                for cur_set in blocks_cfg[block_id]['out']:
+                    print(cur_set)
+                print('in:')
+                for cur_set in blocks_cfg[block_id]['in']:
+                    print(cur_set)
 
             blocks[block_id], num_del = l_dce_single(blocks[block_id], used_set)
             if num_del == 0:
@@ -274,11 +293,13 @@ if __name__ == "__main__":
         t_cpf(fn)
 
     for fn in prog["functions"]:
-        # print(f"-----Function {fn['name']}-----")
+        if DEBUG:
+            print(f"-----Function {fn['name']}-----")
         t_lva(fn)
 
     # Output the program
-    json.dump(prog, sys.stdout, indent=2)
+    if not DEBUG:
+        json.dump(prog, sys.stdout, indent=2)
 
     # test merge
     # d1 = {'a': 1, 'b': 2, 'c': 3}
