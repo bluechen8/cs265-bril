@@ -1,14 +1,15 @@
 import json
 import sys
+import copy
 from block_gen import block_gen
 
-def union_sets(sets):
+def intersect_sets(sets):
     if len(sets) == 0:
         return set()
-    union_items = set()
+    intersect_items = copy.deepcopy(sets[0])
     for s in sets:
-        union_items.update(s)
-    return union_items
+        intersect_items.intersection_update(s)
+    return intersect_items
 
 
 # trivial dominator frontier for blocks
@@ -32,7 +33,7 @@ def t_dom_frontier(blocks_cfg):
             print(f"init_in: {blocks_cfg[block_id]['in']}")
             print(f"init_out: {blocks_cfg[block_id]['out']}")
         # compute out
-        out_set = union_sets(blocks_cfg[block_id]['in'])
+        out_set = intersect_sets(blocks_cfg[block_id]['in'])
         # all blocks are dominated by itself
         out_set.add(block_id)
         if DEBUG:
@@ -47,7 +48,21 @@ def t_dom_frontier(blocks_cfg):
         if DEBUG:
             print(f"worklist: {worklist}")
             print('-------------------------')
-    return blocks_cfg
+
+    # generate dom frontier
+    dom_frontier = {}
+    for block_id in range(len(blocks_cfg)):
+        block = blocks_cfg[block_id]
+        for in_set in block['in']:
+            for in_elem in in_set:
+                print(f"in_elem: {in_elem}")
+                if in_elem not in block['out'][0]:
+                    if in_elem not in dom_frontier:
+                        dom_frontier[in_elem] = []
+                    dom_frontier[in_elem].append(block_id)
+    if DEBUG:
+        print(f"dom_frontier: {dom_frontier}")
+    return dom_frontier
 
 
 # trivial conversion to ssa for one function
