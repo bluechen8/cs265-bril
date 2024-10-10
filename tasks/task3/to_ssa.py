@@ -29,7 +29,7 @@ def t_dom_frontier(blocks_cfg):
     while len(worklist) > 0:
         block_id = worklist.pop(0)
         if DEBUG:
-            print(f"-----Block {block_id}-----")
+            print(f"-----Block {block_id} ({blocks_cfg[block_id]['label']})-----")
             print(f"init_in: {blocks_cfg[block_id]['in']}")
             print(f"init_out: {blocks_cfg[block_id]['out']}")
         # compute out
@@ -55,7 +55,6 @@ def t_dom_frontier(blocks_cfg):
         block = blocks_cfg[block_id]
         for in_set in block['in']:
             for in_elem in in_set:
-                print(f"in_elem: {in_elem}")
                 if in_elem not in block['out'][0]:
                     if in_elem not in dom_frontier:
                         dom_frontier[in_elem] = []
@@ -64,6 +63,20 @@ def t_dom_frontier(blocks_cfg):
         print(f"dom_frontier: {dom_frontier}")
     return dom_frontier
 
+# trivial variable -> defined block map
+def t_var2block(blocks):
+    var2block = {}
+    for block_id in range(len(blocks)):
+        block = blocks[block_id]
+        for instr in block:
+            dest = instr.get('dest')
+            if dest is not None:
+                if dest not in var2block:
+                    var2block[dest] = []
+                var2block[dest].append((block_id, instr['type']))
+    if DEBUG:
+        print(f"var2block: {var2block}")
+    return var2block
 
 # trivial conversion to ssa for one function
 def t_to_ssa(fn):
@@ -73,9 +86,33 @@ def t_to_ssa(fn):
     # compute dominator frontier
     dom_frontier = t_dom_frontier(blocks_cfg)
 
+    # generate variable -> defined block map
+    var2block = t_var2block(blocks)
+
+    # insert phi functions
+    for var in var2block:
+        for def_block, type in var2block[var]:
+            if def_block in dom_frontier:
+                for join_block in dom_frontier[def_block]:
+                    if DEBUG:
+                        print(f"-----Insert phi for {var} in block {join_block}-----")
+                    # check second instr of join block (phi or not)
+                    if blocks[join_block][1]['op'] == 'phi':
+                        blocks[join_block][1]['args'].append(var)
+                        blocks[join_block][1]['labels'].append(blocks_cfg[def_block]['label'])
+                    else:
+                        blocks[join_block].insert(1, {'args': [var],
+                                                    'dest': var,
+                                                    'labels': [blocks_cfg[def_block]['label']],
+                                                    'op': 'phi',
+                                                    'type': type})
+                    if DEBUG:
+                        print(blocks[join_block])
+    fn["instrs"] = [inst for block in blocks for inst in block]
+
 
 if __name__ == "__main__":
-    DEBUG = True
+    DEBUG = False
     prog = json.load(sys.stdin)
 
     # Analyze th program p

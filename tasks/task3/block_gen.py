@@ -56,6 +56,7 @@ def block_gen(fn):
                 cur_block.append(instr)
 
             cur_label = instr['label']
+            cur_block_cfg['label'] = cur_label
             # add to label2succ
             if cur_label not in label2succ:
                 label2succ[cur_label] = []
