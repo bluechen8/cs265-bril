@@ -7,15 +7,29 @@ TERMINATORS = 'br', 'jmp', 'ret'
 def block_gen(fn):
     blocks = []
     block_idx = 0
-    # define structures to build cfg
     label2pred = {}
     label2succ = {}
     blocks_cfg = []
     cur_block = []
     cur_block_cfg = {'pred': [], 'succ': [], 'touch': 0, 'in': [], 'out': []}
+    # insert a label if the first instr is not a label
+    # add args to the first block
+    fn['instrs'].insert(0, {'label': 'force_entry'})
+    if 'args' in fn:
+        for arg in fn['args']:
+            fn['instrs'].insert(1,
+                                {'args': [arg['name']],
+                                'dest': arg['name'],
+                                'op': 'id',
+                                'type': arg['type']})
     # iterate inst
     for instr in fn["instrs"]:
         if 'op' in instr:
+            # check if op is the first in the block
+            # then drop it
+            # every block starts with a label
+            if len(cur_block) == 0:
+                continue
             # terminator, add to current block and start a new
             if instr['op'] in TERMINATORS:
                 # check terminator

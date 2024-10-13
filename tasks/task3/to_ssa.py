@@ -3,11 +3,36 @@ import sys
 import copy
 from block_gen import block_gen
 
-def intersect_sets(sets):
+def merge_dicts(dicts, pos=False):
+    if len(dicts) == 0:
+        return {}
+    # print(dicts)
+    # pick a non-empty dict
+    common_items = set()
+    for d in dicts:
+        if len(d) > 0:
+            common_items = set(d.items())
+            break
+    # print(common_items)
+    for d in dicts:
+        if pos and len(d) == 0:
+            continue
+        common_items &= set(d.items())
+    # print(common_items)
+    return dict(common_items)
+
+def intersect_sets(sets, pos=False):
     if len(sets) == 0:
         return set()
-    intersect_items = copy.deepcopy(sets[0])
+    # pick a non-empty set
+    intersect_items = set()
     for s in sets:
+        if len(s) > 0:
+            intersect_items = copy.deepcopy(s)
+            break
+    for s in sets:
+        if pos and len(s) == 0:
+            continue
         intersect_items.intersection_update(s)
     return intersect_items
 
@@ -15,25 +40,24 @@ def intersect_sets(sets):
 # trivial dominator frontier for blocks
 def t_dom_frontier(blocks_cfg):
     # initialize dom frontier
-    # add single pred block to worklist
-    worklist = []
+    worklist = [0]
     for block_id in range(len(blocks_cfg)):
         block = blocks_cfg[block_id]
         block['out'].append(set())
         len_pred = len(block['pred'])
         for _ in range(len_pred):
             block['in'].append(set())
-        if len_pred <= 1:
-            worklist.append(block_id)
+        # if len_pred <= 1:
+        #     worklist.append(block_id)
     
     while len(worklist) > 0:
         block_id = worklist.pop(0)
         if DEBUG:
-            print(f"-----Block {block_id} ({blocks_cfg[block_id]['label']})-----")
+            print(f"-----Block {block_id} ({blocks_cfg[block_id].get('label')})-----")
             print(f"init_in: {blocks_cfg[block_id]['in']}")
             print(f"init_out: {blocks_cfg[block_id]['out']}")
         # compute out
-        out_set = intersect_sets(blocks_cfg[block_id]['in'])
+        out_set = intersect_sets(blocks_cfg[block_id]['in'], pos=False)
         # all blocks are dominated by itself
         out_set.add(block_id)
         if DEBUG:
@@ -72,11 +96,20 @@ def t_var2block(blocks):
             dest = instr.get('dest')
             if dest is not None:
                 if dest not in var2block:
-                    var2block[dest] = []
-                var2block[dest].append((block_id, instr['type']))
+                    var2block[dest] = set()
+                var2block[dest].add((block_id, instr['type']))
     if DEBUG:
         print(f"var2block: {var2block}")
     return var2block
+
+# check if a block contains phi func for one var
+def has_phi(block, var):
+    for instr_id, instr in enumerate(block):
+        if 'op' in instr and instr['op'] == 'phi':
+            dest_raw = ''.join(instr['dest'].split('.')[:-1])
+            if dest_raw == var:
+                return instr_id
+    return None
 
 # trivial conversion to ssa for one function
 def t_to_ssa(fn):
@@ -84,30 +117,101 @@ def t_to_ssa(fn):
     blocks, blocks_cfg = block_gen(fn)
 
     # compute dominator frontier
-    dom_frontier = t_dom_frontier(blocks_cfg)
+    dom_frontier = t_dom_frontier(copy.deepcopy(blocks_cfg))
 
     # generate variable -> defined block map
     var2block = t_var2block(blocks)
 
-    # insert phi functions
+    # insert phi functionsz
+    var2count = {}
     for var in var2block:
+        var2count[var] = 0
         for def_block, type in var2block[var]:
-            if def_block in dom_frontier:
-                for join_block in dom_frontier[def_block]:
-                    if DEBUG:
-                        print(f"-----Insert phi for {var} in block {join_block}-----")
-                    # check second instr of join block (phi or not)
-                    if blocks[join_block][1]['op'] == 'phi':
-                        blocks[join_block][1]['args'].append(var)
-                        blocks[join_block][1]['labels'].append(blocks_cfg[def_block]['label'])
-                    else:
-                        blocks[join_block].insert(1, {'args': [var],
-                                                    'dest': var,
-                                                    'labels': [blocks_cfg[def_block]['label']],
-                                                    'op': 'phi',
-                                                    'type': type})
-                    if DEBUG:
-                        print(blocks[join_block])
+            # assign a new name to each def
+            for instr in blocks[def_block]:
+                if instr.get('dest') == var:
+                    var2count[var] += 1
+                    instr['dest'] = f"{var}.{var2count[var]}"
+            # insert phi functions
+            if dom_frontier.get(def_block) is None: continue
+            for join_block in dom_frontier[def_block]:
+                if DEBUG:
+                    print(f"-----Insert phi for {var} in block {join_block}-----")
+                # check second instr of join block (phi or not)
+                instr_idx = has_phi(blocks[join_block], var)
+                if instr_idx is None:
+                    var2count[var] += 1
+                    blocks[join_block].insert(1, {'args': [],
+                                                'dest': f"{var}.{var2count[var]}",
+                                                'labels': [],
+                                                'op': 'phi',
+                                                'type': type})
+    
+                if DEBUG:
+                    print(blocks[join_block])
+    
+    # iterate blocks to rename uses and complete phi functions
+    worklist = [0]
+    blocks_cfg[0]['in'].append({})
+    while len(worklist) > 0:
+        block_id = worklist.pop(0)
+        block = blocks[block_id]
+        blocks_cfg[block_id]['touch'] += 1
+        start_dic = merge_dicts(blocks_cfg[block_id]['in'], pos=True)
+        if DEBUG:
+            print(f"-----Block {block_id} ({blocks_cfg[block_id].get('label')})-----")
+            print(f"in: {blocks_cfg[block_id]['in']}")
+            print(f"start_dic: {start_dic}")
+        for instr in block:
+            # check args first
+            if 'args' in instr:
+                if instr['op'] == 'phi':
+                    # get dest var
+                    dest_raw = ''.join(instr['dest'].split('.')[:-1])
+                    # check pred
+                    for pred_idx, pred_block_id in enumerate(blocks_cfg[block_id]['pred']):
+                        # check if already inserted
+                        pred_label = blocks_cfg[pred_block_id].get('label')
+                        if pred_label is None:
+                            print(f"Error: block {pred_block_id} has no label")
+                            exit(1)
+                        if pred_label in instr['labels']:
+                            continue
+                        # get ssa var name
+                        ssa_var = blocks_cfg[block_id]['in'][pred_idx].get(dest_raw)
+                        # pred is not ready
+                        if ssa_var is None:
+                            continue
+                        instr['args'].append(ssa_var)
+                        instr['labels'].append(pred_label)
+                else:
+                    for arg in instr['args']:
+                        if arg in start_dic:
+                            instr['args'][instr['args'].index(arg)] = start_dic[arg]
+                            if DEBUG:
+                                print(f"Replace {arg} with {start_dic[arg]}")
+                        else:
+                            if DEBUG:
+                                print(f"Error: {arg} not defined")
+            # check dest
+            if 'dest' in instr:
+                dest_raw = ''.join(instr['dest'].split('.')[:-1])
+                start_dic[dest_raw] = instr['dest']
+        
+        if DEBUG:
+            print(f"out start_dic: {start_dic}")
+
+        # insert succ to worklist
+        for succ_id in blocks_cfg[block_id]['succ']:
+            if len(blocks_cfg[succ_id]['in']) == 0:
+                # initialize in
+                for _ in range(len(blocks_cfg[succ_id]['pred'])):
+                    blocks_cfg[succ_id]['in'].append({})
+            if blocks_cfg[succ_id]['in'][blocks_cfg[succ_id]['pred'].index(block_id)] != start_dic:
+                blocks_cfg[succ_id]['in'][blocks_cfg[succ_id]['pred'].index(block_id)] = start_dic
+                if succ_id not in worklist:
+                    worklist.append(succ_id)
+
     fn["instrs"] = [inst for block in blocks for inst in block]
 
 

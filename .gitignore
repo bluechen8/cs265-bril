@@ -17,3 +17,7 @@ __pycache__
 
 # ignore json files
 *.json
+
+# ignore output log
+*.log
+*.txt
