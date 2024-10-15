@@ -36,6 +36,13 @@ def intersect_sets(sets, pos=False):
         intersect_items.intersection_update(s)
     return intersect_items
 
+def union_sets(sets):
+    if len(sets) == 0:
+        return set()
+    union_items = set()
+    for s in sets:
+        union_items.update(s)
+    return union_items
 
 # trivial dominator frontier for blocks
 def t_dom_frontier(blocks_cfg):
@@ -226,6 +233,117 @@ def t_to_ssa(fn):
     fn["instrs"] = [inst for block in blocks for inst in block]
 
 
+# trivial live variable analysis for one block
+def t_lva_single(block, used_set):
+    if DEBUG:
+        print(f"initial used_set: {used_set}")
+    # iterate inst in one local block (reverse order)
+    for inst_idx in reversed(range(len(block))):
+        inst = block[inst_idx]
+        if DEBUG:
+            print(f"[+] inst dut: {inst}")
+        # check dest variable
+        # new definition -> clear used_set
+        dest = inst.get('dest')
+        if dest is not None:
+            used_set.discard(dest)
+            if DEBUG:
+                print(f"[++] discard {dest}")
+        # check args variables
+        # args -> used -> add to used_set
+        if 'args' in inst:
+            for arg in inst['args']:
+                used_set.add(arg)
+                if DEBUG:
+                    print(f"[++] add {arg}")
+    return used_set
+
+# trivial local dead code elimination for one block
+def l_dce_single(block, used_set):
+    # delete inst list
+    del_list = []
+    # interate inst in one local block
+    for inst_idx in reversed(range(len(block))):
+        inst = block[inst_idx]
+        # ignore labels
+        if 'op' in inst:
+            # process dest
+            dest = inst.get('dest')
+            if dest is not None:
+                if dest not in used_set:
+                    del_list.append(inst_idx)
+                else:
+                    used_set.remove(dest)
+            # process args
+            if inst_idx in del_list:
+                continue
+            if 'args' in inst:
+                for arg in inst["args"]:
+                    used_set.add(arg)
+
+    block = [inst for idx, inst in enumerate(block) if idx not in del_list]
+    return block, used_set
+
+# trivial live variable analysis
+def t_lva(fn):
+    # interate blocks
+    blocks, blocks_cfg = block_gen(fn, dummy=False)
+    # initialize in and out table
+    for block in blocks_cfg:
+        for _ in range(len(block['succ'])):
+            block['out'].append(set())
+        block['in'].append(set())
+    # initialize worklist
+    worklist = []
+    for block_idx in range(len(blocks_cfg)):
+        block = blocks_cfg[block_idx]
+        if len(block['succ']) == 0:
+            worklist.append(block_idx)
+
+    # big while loop containing both lva and dce
+    dce_mode = False
+    while len(worklist) > 0 or not dce_mode:
+        # check worklist length
+        if len(worklist) == 0:
+            # liveness analysis done, start dce
+            dce_mode = True
+            # add all nodes
+            for block_idx in range(len(blocks_cfg)):
+                worklist.append(block_idx)
+
+        block_id = worklist.pop()
+
+        if DEBUG:
+            print(f"-----Block {block_id}-----")
+            print(f"out: {blocks_cfg[block_id]['out']}")
+
+        # liveness or dce analysis
+        if not dce_mode:
+            used_set = t_lva_single(blocks[block_id], union_sets(blocks_cfg[block_id]['out']))
+        else:
+            blocks[block_id], used_set = l_dce_single(blocks[block_id], union_sets(blocks_cfg[block_id]['out']))
+        if DEBUG:
+            print(f"used_set: {used_set}")
+        blocks_cfg[block_id]['touch'] += 1
+        # if in changed, update pred
+        if used_set != blocks_cfg[block_id]['in'][0]:
+            for pred_id in blocks_cfg[block_id]['pred']:
+                if pred_id not in worklist:
+                    worklist.append(pred_id)
+                blocks_cfg[pred_id]['out'][blocks_cfg[pred_id]['succ'].index(block_id)] = used_set
+            blocks_cfg[block_id]['in'][0] = used_set
+        else:
+            # if pred has not been touched, add to worklist
+            for pred_id in blocks_cfg[block_id]['pred']:
+                if pred_id not in worklist and blocks_cfg[pred_id]['touch'] == 0:
+                    worklist.append(pred_id)
+        if DEBUG:
+            print(f"worklist: {worklist}")
+            print('-------------------------')
+
+    fn["instrs"] = [inst for block in blocks for inst in block]
+
+
 if __name__ == "__main__":
     DEBUG = False
     prog = json.load(sys.stdin)
@@ -235,6 +353,12 @@ if __name__ == "__main__":
         if DEBUG:
             print(f"-----Function {fn['name']}-----")
         t_to_ssa(fn)
+
+    # liveness and dce
+    for fn in prog["functions"]:
+        if DEBUG:
+            print(f"-----Function {fn['name']}-----")
+        t_lva(fn)
 
     # Output the program
     if not DEBUG:
