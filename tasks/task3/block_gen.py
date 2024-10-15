@@ -4,7 +4,7 @@ import sys
 TERMINATORS = 'br', 'jmp', 'ret'
 
 # generate basic blocks
-def block_gen(fn):
+def block_gen(fn, dummy=False):
     blocks = []
     block_idx = 0
     label2pred = {}
@@ -13,15 +13,19 @@ def block_gen(fn):
     cur_block = []
     cur_block_cfg = {'pred': [], 'succ': [], 'touch': 0, 'in': [], 'out': []}
     # insert a label if the first instr is not a label
+    if 'op' in fn['instrs'][0]:
+        fn['instrs'].insert(0, {'label': 'entry'})
+
     # add args to the first block
-    fn['instrs'].insert(0, {'label': 'force_entry'})
-    if 'args' in fn:
-        for arg in fn['args']:
-            fn['instrs'].insert(1,
-                                {'args': [arg['name']],
-                                'dest': arg['name'],
-                                'op': 'id',
-                                'type': arg['type']})
+    if dummy and 'args' in fn:
+        fn['instrs'].insert(0, {'label': 'dummy_entry'})
+        if 'args' in fn:
+            for arg in fn['args']:
+                fn['instrs'].insert(1,
+                                    {'args': [arg['name']],
+                                    'dest': arg['name'],
+                                    'op': 'id',
+                                    'type': arg['type']})
     # iterate inst
     for instr in fn["instrs"]:
         if 'op' in instr:

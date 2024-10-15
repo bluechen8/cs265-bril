@@ -114,7 +114,7 @@ def has_phi(block, var):
 # trivial conversion to ssa for one function
 def t_to_ssa(fn):
     # iterate blocks
-    blocks, blocks_cfg = block_gen(fn)
+    blocks, blocks_cfg = block_gen(fn, dummy=True)
 
     # compute dominator frontier
     dom_frontier = t_dom_frontier(copy.deepcopy(blocks_cfg))
@@ -212,6 +212,17 @@ def t_to_ssa(fn):
                 if succ_id not in worklist:
                     worklist.append(succ_id)
 
+    # strip out dummy blocks
+    if 'dummy_entry' in blocks_cfg[0]['label']:
+        new_map = {}
+        for instr in blocks[0]:
+            if 'op' not in instr:
+                continue
+            assert instr['op'] == 'id'
+            new_map[instr['args'][0]] = instr['dest']
+        for arg in fn['args']:
+            arg['name'] = new_map[arg['name']]
+        blocks.pop(0)
     fn["instrs"] = [inst for block in blocks for inst in block]
 
 
