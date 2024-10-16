@@ -75,8 +75,6 @@ def t_dom_frontier(blocks_cfg):
         len_pred = len(block['pred'])
         for _ in range(len_pred):
             block['in'].append(set())
-        # if len_pred <= 1:
-        #     worklist.append(block_id)
     
     while len(worklist) > 0:
         block_id = worklist.pop(0)

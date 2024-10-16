@@ -1,9 +1,15 @@
-@main {
-  v4: int = id a;
-  tmp: int = id v4;
-  v5: int = id b;
-  a: int = id v5;
-  v6: int = id tmp;
-  b: int = id v6;
-  ret b;
+@main(n: int): int {
+    one: int = const 1;
+    sum: int = const 0;
+    i: int = const 1;
+    
+.for_start:
+    con: bool = le i n;
+    br con .for .end;
+.for:
+    sum: int = add sum i;
+    i: int = add i one;
+    jmp .for_start;
+.end:
+    ret sum;
 }
