@@ -1,0 +1,9 @@
+@main {
+  v4: int = id a;
+  tmp: int = id v4;
+  v5: int = id b;
+  a: int = id v5;
+  v6: int = id tmp;
+  b: int = id v6;
+  ret b;
+}

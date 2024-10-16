@@ -3,6 +3,27 @@ import sys
 import copy
 from block_gen import block_gen
 
+COMMUTATIVE_OPS = ['add', 'mul', 'sub', 'eq']
+BAD_CONST_OPS = ['call', 'ret', 'print']
+
+def str2bool(arg):
+    if arg.lower() == 'true':
+        return True
+    elif arg.lower() == 'false':
+        return False
+    else:
+        exit(f"Unknown boolean value {arg}")
+
+# print current table
+def print_table(dest2num, val2num, num2dest, num2val):
+    for num in num2val.keys():
+        print(f"{num}: {num2val[num]} | {num2dest[num]}")
+        # test dest2num
+        for dest in num2dest[num]:
+            assert dest2num[dest] == num
+        # test val2num
+        assert val2num[num2val[num]] == num
+
 def merge_dicts(dicts, pos=False):
     if len(dicts) == 0:
         return {}
@@ -229,7 +250,8 @@ def t_to_ssa(fn):
             new_map[instr['args'][0]] = instr['dest']
         for arg in fn['args']:
             arg['name'] = new_map[arg['name']]
-        blocks.pop(0)
+        # preserve the label, remove dummy instr
+        blocks[0] = [instr for instr in blocks[0] if 'op' not in instr and 'label' in instr]
     fn["instrs"] = [inst for block in blocks for inst in block]
 
 
@@ -343,6 +365,137 @@ def t_lva(fn):
 
     fn["instrs"] = [inst for block in blocks for inst in block]
 
+# trivial local value numbering for one block
+def t_lvn_single(block):
+    # declare table
+    dest2num = {}
+    val2num = {}
+    num2dest = {}
+    num2val = {}
+    global_num = 0
+
+    # iterate inst in one local block
+    for inst_idx in range(len(block)):
+        inst = block[inst_idx]
+        dest = inst.get('dest')
+        # flags
+        all_const_flag = True
+        # ignore labels
+        if 'op' in inst:
+            if DEBUG:
+                print(inst)
+            # ignore float
+            if 'type' in inst and inst['type'] == 'float':
+                continue
+            if inst['op'] in BAD_CONST_OPS:
+                continue
+            # check if has args
+            if 'args' in inst or 'value' in inst:
+                if 'value' in inst:
+                    args = [str(inst['value'])]
+                    all_const_flag = False
+                else:  # 'args' in inst
+                    args = [str(dest2num[arg]) if dest2num.get(arg) is not None \
+                        else arg for arg in inst['args']]
+                    args = []
+                    for arg in inst['args']:
+                        argnum = dest2num.get(arg)
+                        if argnum is not None:
+                            if 'const' in num2val[argnum]:
+                                args.append(num2val[argnum].split(' ')[1])
+                                continue
+                            else:
+                                args.append(str(argnum))
+                        else:
+                            args.append(arg)
+                        all_const_flag = False
+
+                # construct value
+                # if all const, then compute it
+                if all_const_flag:
+                    match inst['op']:
+                        case 'const':
+                            value = int(args[0]) if inst['type'] == 'int' else str2bool(args[0])
+                        case 'add':
+                            value = int(args[0]) + int(args[1])
+                        case 'sub':
+                            value = int(args[0]) - int(args[1])
+                        case 'mul':
+                            value = int(args[0]) * int(args[1])
+                        case 'div':
+                            value = int(args[0]) // int(args[1])
+                        case 'id':
+                            value = int(args[0]) if inst['type'] == 'int' else str2bool(args[0])
+                        case 'and':
+                            value = str2bool(args[0]) and str2bool(args[1])
+                        case 'or':
+                            value = str2bool(args[0]) or str2bool(args[1])
+                        case 'not':
+                            value = not str2bool(args[0])
+                        case 'eq':
+                            value = int(args[0]) == int(args[1])
+                        case 'le':
+                            value = int(args[0]) <= int(args[1])
+                        case 'lt':
+                            value = int(args[0]) < int(args[1])
+                        case 'ge':
+                            value = int(args[0]) >= int(args[1])
+                        case 'gt':
+                            value = int(args[0]) > int(args[1])
+                        case 'ne':
+                            value = int(args[0]) != int(args[1])
+                        case _:
+                            exit(f"Unknown operator {inst['op']}")
+                    inst['op'] = 'const'
+                    inst.pop('args', None)
+                    inst['value'] = value
+                    value = 'const ' + str(value)
+                else:
+                    if inst['op'] in COMMUTATIVE_OPS:
+                        args.sort()
+                    if inst['op'] == 'id':
+                        value = args[0]
+                    else:
+                        value = inst['op'] + ' ' + ' '.join(args)
+                if DEBUG:
+                    print(f"Compute the value {value}")
+
+                # search for common value
+                if inst['op'] == 'id' and value.isdecimal():
+                    num = int(value)
+                else:
+                    num = val2num.get(value)
+                if DEBUG:
+                    print(f"Matched num: {num}")
+                if num is None:
+                    # add new num
+                    val2num[value] = global_num
+                    dest2num[dest] = global_num
+                    num2dest[global_num] = [dest]
+                    num2val[global_num] = value
+                    global_num += 1
+                else:
+                    if DEBUG:
+                        print(f"Replace {dest} with {num}")
+                    inst['args'] = [num2dest[num][0]]
+                    inst['op'] = 'id'
+                    dest2num[dest] = num
+                    num2dest[num].append(dest)
+            if DEBUG:
+                print_table(dest2num, val2num, num2dest, num2val)
+                print('-------------------------')
+    return block
+
+# trivial local value numbering
+def t_lvn(fn):
+    # interate blocks
+    blocks, _ = block_gen(fn, dummy=False)
+    for block_id in range(len(blocks)):
+        if DEBUG:
+            print(f"-----Block {block_id}-----")
+        blocks[block_id] = t_lvn_single(blocks[block_id])
+    fn["instrs"] = [inst for block in blocks for inst in block]
+
 
 if __name__ == "__main__":
     DEBUG = False
@@ -353,6 +506,12 @@ if __name__ == "__main__":
         if DEBUG:
             print(f"-----Function {fn['name']}-----")
         t_to_ssa(fn)
+
+    # local load value numbering
+    for fn in prog["functions"]:
+        if DEBUG:
+            print(f"-----Function {fn['name']}-----")
+        t_lvn(fn)
 
     # liveness and dce
     for fn in prog["functions"]:
