@@ -15,3 +15,11 @@ pipeline = [
   "python to_ssa.py",
   "brili -p {args}",
 ]
+
+[runs.final]
+pipeline = [
+  "bril2json",
+  "python to_ssa.py",
+  "python ssa_to.py",
+  "brili -p {args}",
+]
