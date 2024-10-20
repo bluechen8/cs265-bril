@@ -24,22 +24,36 @@ def print_table(dest2num, val2num, num2dest, num2val):
         # test val2num
         assert val2num[num2val[num]] == num
 
-def merge_dicts(dicts, pos=False):
+# pos: if true, ignore empty set
+# loose: if true, include (union) unique keys
+def merge_dicts(dicts, pos=False, loose=False):
     if len(dicts) == 0:
         return {}
     # print(dicts)
     # pick a non-empty dict
     common_items = set()
+    common_keys = set()
     for d in dicts:
         if len(d) > 0:
             common_items = set(d.items())
+            common_keys = set(d.keys())
             break
+    all_keys = copy.deepcopy(common_keys)
     # print(common_items)
     for d in dicts:
         if pos and len(d) == 0:
             continue
         common_items &= set(d.items())
+        common_keys &= set(d.keys())
+        all_keys |= set(d.keys())
     # print(common_items)
+    # collect unique keys
+    unique_keys = all_keys - common_keys
+    for key in unique_keys:
+        for d in dicts:
+            if key in d:
+                common_items.add((key, d[key]))
+                break
     return dict(common_items)
 
 def intersect_sets(sets, pos=False):
@@ -177,43 +191,90 @@ def t_to_ssa(fn):
                     print(blocks[join_block])
     
     # iterate blocks to rename uses and complete phi functions
+    phi_remove_mode = False
     worklist = [0]
     blocks_cfg[0]['in'].append({})
-    while len(worklist) > 0:
+    while len(worklist) > 0 or not phi_remove_mode:
+        # start phi remove after worklist is empty
+        if len(worklist) == 0:
+            if DEBUG:
+                print("########Start phi remove########")
+            phi_remove_mode = True
+            # add all nodes
+            for block_idx in range(len(blocks_cfg)):
+                worklist.append(block_idx)
+
         block_id = worklist.pop(0)
         block = blocks[block_id]
         blocks_cfg[block_id]['touch'] += 1
-        start_dic = merge_dicts(blocks_cfg[block_id]['in'], pos=True)
+        start_dic = merge_dicts(blocks_cfg[block_id]['in'], pos=True, loose=True)
+        if phi_remove_mode:
+            del_list = []
         if DEBUG:
             print(f"-----Block {block_id} ({blocks_cfg[block_id].get('label')})-----")
             print(f"in: {blocks_cfg[block_id]['in']}")
             print(f"start_dic: {start_dic}")
-        for instr in block:
+        for instr_idx, instr in enumerate(block):
             # check args first
             if 'args' in instr:
                 if instr['op'] == 'phi':
                     # get dest var
                     dest_raw = ''.join(instr['dest'].split('.')[:-1])
-                    # check pred
-                    for pred_idx, pred_block_id in enumerate(blocks_cfg[block_id]['pred']):
-                        # check if already inserted
-                        pred_label = blocks_cfg[pred_block_id].get('label')
-                        if pred_label is None:
-                            print(f"Error: block {pred_block_id} has no label")
-                            exit(1)
-                        if pred_label in instr['labels']:
-                            continue
-                        # get ssa var name
-                        ssa_var = blocks_cfg[block_id]['in'][pred_idx].get(dest_raw)
-                        # pred is not ready
-                        if ssa_var is None:
-                            continue
-                        instr['args'].append(ssa_var)
-                        instr['labels'].append(pred_label)
+                    if phi_remove_mode:
+                        # check if args change
+                        for label_idx, label in enumerate(instr['labels']):
+                            pred_idx = 0
+                            for pred_block_id in blocks_cfg[block_id]['pred']:
+                                if label == blocks_cfg[pred_block_id]['label']:
+                                    break
+                                pred_idx += 1
+                            new_arg = blocks_cfg[block_id]['in'][pred_idx].get(dest_raw)
+                            if new_arg is None:
+                                instr['args'].pop(label_idx)
+                                instr['labels'].pop(label_idx)
+                            elif new_arg != instr['args'][label_idx]:
+                                instr['args'][label_idx] = new_arg
+                                    
+                        # check pred to see if we could remove phi
+                        if len(instr['args']) == 2:
+                            # check if one of args is the same as dest
+                            if instr['dest'] in instr['args']:
+                                pick_dest = (instr['args'].index(instr['dest']) + 1) % 2
+                                if DEBUG:
+                                    print(f"Remove {instr['dest']} and keep {instr['args'][pick_dest]}")
+                                # replace dest with the other arg
+                                instr['dest'] = instr['args'][pick_dest]
+                                del_list.append(instr_idx)
+                        elif len(instr['args']) == 1:
+                            if DEBUG:
+                                print(f"Remove {instr['dest']} and keep {instr['args'][0]}")
+                            # replace dest with the only arg
+                            instr['dest'] = instr['args'][0]
+                            del_list.append(instr_idx)
+                    else:
+                        # check pred
+                        for pred_idx, pred_block_id in enumerate(blocks_cfg[block_id]['pred']):
+                            # check if already inserted
+                            pred_label = blocks_cfg[pred_block_id].get('label')
+                            if pred_label is None:
+                                print(f"Error: block {pred_block_id} has no label")
+                                exit(1)
+                            if pred_label in instr['labels']:
+                                continue
+                            # get ssa var name
+                            ssa_var = blocks_cfg[block_id]['in'][pred_idx].get(dest_raw)
+                            # pred is not ready
+                            if ssa_var is None:
+                                continue
+                            instr['args'].append(ssa_var)
+                            instr['labels'].append(pred_label)
                 else:
-                    for arg in instr['args']:
+                    for arg_idx, arg in enumerate(instr['args']):
+                        if phi_remove_mode:
+                            arg_raw = ''.join(arg.split('.')[:-1])
+                            arg = arg_raw
                         if arg in start_dic:
-                            instr['args'][instr['args'].index(arg)] = start_dic[arg]
+                            instr['args'][arg_idx] = start_dic[arg]
                             if DEBUG:
                                 print(f"Replace {arg} with {start_dic[arg]}")
                         else:
@@ -237,6 +298,10 @@ def t_to_ssa(fn):
                 blocks_cfg[succ_id]['in'][blocks_cfg[succ_id]['pred'].index(block_id)] = start_dic
                 if succ_id not in worklist:
                     worklist.append(succ_id)
+        
+        # remove phi instr
+        if phi_remove_mode:
+            blocks[block_id] = [instr for idx, instr in enumerate(block) if idx not in del_list]
 
     # strip out dummy blocks
     if 'dummy_entry' in blocks_cfg[0]['label']:
