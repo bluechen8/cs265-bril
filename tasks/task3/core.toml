@@ -16,10 +16,19 @@ pipeline = [
   "brili -p {args}",
 ]
 
+[runs.licm]
+pipeline = [
+  "bril2json",
+  "python to_ssa.py",
+  "python licm.py",
+  "brili -p {args}",
+]
+
 [runs.final]
 pipeline = [
   "bril2json",
   "python to_ssa.py",
+  "python licm.py",
   "python ssa_to.py",
   "brili -p {args}",
 ]

@@ -4,14 +4,17 @@
     i: int = const 0;
     one: int = const 1;
     k: int = const 0;
+
+.while_cond:
+    cond: bool = eq i a;
+    br cond .end .while_body;
     
 .while_body:
     i: int = add i one;
     c: int = add a b;
     k: int = add c k;
-.while_cond:
-    cond: bool = eq i a;
-    br cond .end .while_body;
+    jmp .while_cond;
+
 .end:
     print k;
     ret k;
