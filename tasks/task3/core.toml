@@ -9,22 +9,22 @@ pipeline = [
   "brili -p {args}",
 ]
 
-[runs.ssa]
+[runs.tossa]
 pipeline = [
   "bril2json",
   "python to_ssa.py",
+  "brili -p {args}",
+]
+
+[runs.ssato]
+pipeline = [
+  "bril2json",
+  "python to_ssa.py",
+  "python ssa_to.py",
   "brili -p {args}",
 ]
 
 [runs.licm]
-pipeline = [
-  "bril2json",
-  "python to_ssa.py",
-  "python licm.py",
-  "brili -p {args}",
-]
-
-[runs.final]
 pipeline = [
   "bril2json",
   "python to_ssa.py",
