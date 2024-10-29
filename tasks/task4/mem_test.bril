@@ -3,6 +3,7 @@
     vals2: ptr<int> = alloc input;
     one: int = const 1;
     store vals1 one;
-    load vals2 two;
+    result: int = load vals1;
     store vals1 one;
+    ret result;
 }

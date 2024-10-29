@@ -19,6 +19,21 @@ def merge_ptr_dict(dicts):
                 union_dict[key].update(d[key])
     return union_dict
 
+def intersect_sets(sets, pos=False):
+    if len(sets) == 0:
+        return set()
+    # pick a non-empty set
+    intersect_items = set()
+    for s in sets:
+        if len(s) > 0:
+            intersect_items = copy.deepcopy(s)
+            break
+    for s in sets:
+        if pos and len(s) == 0:
+            continue
+        intersect_items.intersection_update(s)
+    return intersect_items
+
 # Memoy op alias analysis
 def mem_alias(fn):
     blocks, blocks_cfg = block_gen(fn, dummy=False)
@@ -78,6 +93,92 @@ def mem_alias(fn):
     if DEBUG:
         print(f"Final map: {ptr_map}")
 
+    # passes for dead store elimination
+    # initialize
+    for block_idx in reversed(range(len(blocks_cfg))):
+        block = blocks_cfg[block_idx]
+        for _ in range(len(block['succ'])):
+            block['out'].append(set())
+        block['in'].append(set())
+        worklist.append(block_idx)
+    # iterate until stable
+    eliminate_flag = False
+    while len(worklist) > 0 or not eliminate_flag:
+        if len(worklist) == 0:
+            eliminate_flag = True
+            # refill worklist
+            for block_idx in reversed(range(len(blocks_cfg))):
+                worklist.append(block_idx)
+            if DEBUG:
+                print("*******Eliminate pass*******")
+        block_id = worklist.pop(0)
+        if DEBUG:
+            print(f"-----Block {block_id}({blocks_cfg[block_id].get('label')})-----")
+        # pull out the store set
+        store_set = intersect_sets(blocks_cfg[block_id]['out'])
+        if DEBUG:
+            print(f"OUT: {store_set}")
+
+        # iterate through the instructions
+        del_list = []
+        for instr_idx in reversed(range(len(blocks[block_id]))):
+            instr = blocks[block_id][instr_idx]
+            op = instr.get('op')
+            # check if instr is store
+            if op == 'store':
+                store_ptr = instr['args'][0]
+                # add store ptr to store list
+                # check if the store ptr is in the store set
+                if store_ptr in store_set:
+                    del_list.append(instr_idx)
+                    if DEBUG:
+                        print(f"Instr removed {instr}")
+                else:
+                    store_set.add(store_ptr)
+            elif op == 'load':
+                # check if instr is load
+                # load instr should remove ptr
+                # may collide with its location
+                load_ptr = instr['args'][0]
+                load_ptr_loc_set = ptr_map[load_ptr]
+                del_store_set = set()
+                for store_ptr in store_set:
+                    store_ptr_loc_set = ptr_map[store_ptr]
+                    # check if the store ptr points to the load ptr
+                    if 'all' in store_ptr_loc_set or 'all' in load_ptr_loc_set:
+                        del_store_set.add(store_ptr)
+                        if DEBUG:
+                            print(f"Remove {store_ptr} due to {load_ptr}")
+                    elif len(store_ptr_loc_set.intersection(load_ptr_loc_set)) > 0:
+                        del_store_set.add(store_ptr)
+                        if DEBUG:
+                            print(f"Remove {store_ptr} due to {load_ptr}")
+                store_set -= del_store_set
+        if DEBUG:
+            print(f"IN: {store_set}")
+        # remove the store instr if eliminate flag is true
+        if eliminate_flag:
+            if DEBUG:
+                print(f"del_list: {del_list}")
+            blocks[block_id] = [instr for instr_idx, instr in enumerate(blocks[block_id]) if instr_idx not in del_list]
+
+        # check if the in has changed
+        in_update_flag = store_set != blocks_cfg[block_id]['in'][0]
+        if in_update_flag:
+            blocks_cfg[block_id]['in'][0] = copy.deepcopy(store_set)
+            if DEBUG:
+                print(f"IN updated")
+        for pred_id in blocks_cfg[block_id]['pred']:
+            out_idx = blocks_cfg[pred_id]['succ'].index(block_id)
+            if in_update_flag:
+                blocks_cfg[pred_id]['out'][out_idx] = copy.deepcopy(store_set)
+                if pred_id not in worklist:
+                    worklist.append(pred_id)
+        if DEBUG:
+            print(f"worklist: {worklist}")
+    
+    fn["instrs"] = [inst for block in blocks for inst in block]
+
 def mem_alias_single(blocks, blocks_cfg, block_id):
     # union the in of all preds to get list of pointer
     ptr_dict = merge_ptr_dict(blocks_cfg[block_id]['in'])
@@ -121,6 +222,11 @@ def mem_alias_single(blocks, blocks_cfg, block_id):
             for arg in instr['args']:
                 if arg in ptr_dict:
                     ptr_dict[dest_var].update(ptr_dict[arg])
+        elif op == 'call' and 'dest' in instr and isinstance(instr['type'], dict):
+            update_str = "call"
+            # if the dest is a pointer, it should point to everywhere
+            ptr_dict[dest_var] = set()
+            ptr_dict[dest_var].add('all')
         else:
             update_flag = False
 
@@ -130,13 +236,13 @@ def mem_alias_single(blocks, blocks_cfg, block_id):
     return ptr_dict
 
 if __name__ == "__main__":
-    DEBUG = True
+    DEBUG = False
     prog = json.load(sys.stdin)
 
     for fn in prog['functions']:
         if DEBUG:
             print(f"-----Function {fn['name']}-----")
-            mem_alias(fn)
+        mem_alias(fn)
 
 
     # Output the program
