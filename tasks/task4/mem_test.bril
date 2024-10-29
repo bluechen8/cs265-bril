@@ -1,0 +1,8 @@
+@main(input: int) {
+    vals1: ptr<int> = alloc input;
+    vals2: ptr<int> = alloc input;
+    one: int = const 1;
+    store vals1 one;
+    load vals2 two;
+    store vals1 one;
+}

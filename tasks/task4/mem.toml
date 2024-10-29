@@ -9,9 +9,19 @@ pipeline = [
   "brili -p {args}",
 ]
 
-[runs.tossa]
+[runs.opt]
 pipeline = [
   "bril2json",
   "python to_ssa.py",
+  "python ssa_to.py",
+  "brili -p {args}",
+]
+
+[runs.memopt]
+pipeline = [
+  "bril2json",
+  "python to_ssa.py",
+  "python memopt.py",
+  "python ssa_to.py",
   "brili -p {args}",
 ]
