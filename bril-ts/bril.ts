@@ -13,9 +13,14 @@ export type Ident = string;
 export type PrimType = "int" | "bool" | "float" | "char";
 
 /**
+ * Primitive taint.
+ */
+export type TaintType = "public" | "private";
+
+/**
  * Parameterized types. (We only have pointers for now.)
  */
-export type ParamType = {ptr: Type};
+export type ParamType = {ptr: PrimType} | {ptr: PrimType, taint: TaintType} | {prim: PrimType, taint: TaintType};
 
 /**
  * Value types.

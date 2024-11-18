@@ -1,0 +1,6 @@
+@main(input: int) {
+    pubdata: prim<int>, taint<public> = const 1;
+    secdata: prim<int>, taint<private> = const 2;
+    result: int = add pubdata secdata;
+    ret result;
+}
