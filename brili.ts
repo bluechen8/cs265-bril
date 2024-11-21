@@ -147,6 +147,53 @@ const argCounts: {[key in bril.OpCode]: number | null} = {
   int2char: 1,
 };
 
+const execCycles: {[key in bril.OpCode]: number} = {
+  add: 1,
+  mul: 3,
+  sub: 1,
+  div: 3,
+  id: 1,
+  lt: 1,
+  le: 1,
+  gt: 1,
+  ge: 1,
+  eq: 1,
+  not: 1,
+  and: 1,
+  or: 1,
+  fadd: 3,
+  fmul: 5,
+  fsub: 3,
+  fdiv: 5,
+  flt: 3,
+  fle: 3,
+  fgt: 3,
+  fge: 3,
+  feq: 3,
+  print: 1,
+  br: 1,
+  jmp: 1,
+  ret: 1,
+  nop: 1,
+  call: 1,
+  alloc: 1,
+  free: 1,
+  store: 10,
+  load: 10,
+  ptradd: 1,
+  phi: 0,
+  speculate: 0,
+  guard: 1,
+  commit: 0,
+  ceq: 1,
+  clt: 1,
+  cle: 1,
+  cgt: 1,
+  cge: 1,
+  char2int: 1,
+  int2char: 1,
+};
+
 type Pointer = {
   loc: Key;
   type: bril.Type;
@@ -154,6 +201,9 @@ type Pointer = {
 
 type Value = boolean | BigInt | Pointer | number | string;
 type Env = Map<bril.Ident, Value>;
+
+// Add a taint type map
+type TaintEnv = Map<bril.Ident, bril.TaintType>;
 
 /**
  * Check whether a run-time value matches the given static type.
@@ -188,12 +238,27 @@ function typeCmp(lhs: bril.Type, rhs: bril.Type): boolean {
   }
 }
 
+/**
+ * Check numbers are subnormal.
+ */
+function isSubnormal(num: number): boolean {
+  return Math.abs(num) < 1e-10 && Math.abs(num) > 0;
+}
+
 function get(env: Env, ident: bril.Ident) {
   let val = env.get(ident);
   if (typeof val === 'undefined') {
     throw error(`undefined variable ${ident}`);
   }
   return val;
+}
+
+function get_taint(taintenv: TaintEnv, ident: bril.Ident) {
+  let taint = taintenv.get(ident);
+  if (typeof taint === 'undefined') {
+    throw error(`undefined taint variable ${ident}`);
+  }
+  return taint;
 }
 
 function findFunc(func: bril.Ident, funcs: readonly bril.Function[]) {
@@ -272,6 +337,18 @@ function getChar(instr: bril.Operation, env: Env, index: number): string {
   return getArgument(instr, env, index, 'char') as string;
 }
 
+function getTaint(instr: bril.Operation, taintenv: TaintEnv, index: number): bril.TaintType {
+  let args = instr.args || [];
+  if (args.length <= index) {
+    throw error(`${instr.op} expected at least ${index+1} arguments; got ${args.length}`);
+  }
+  let taint = taintenv.get(args[index]);
+  if (taint === undefined) {
+    throw error(`undefined taint variable ${args[index]}`);
+  }
+  return taint;
+}
+
 function getLabel(instr: bril.Operation, index: number): bril.Ident {
   if (!instr.labels) {
     throw error(`missing labels; expected at least ${index+1}`);
@@ -310,11 +387,15 @@ let NEXT: Action = {"action": "next"};
  */
 type State = {
   env: Env,
+  taintenv: TaintEnv,
   readonly heap: Heap<Value>,
   readonly funcs: readonly bril.Function[],
 
-  // For profiling: a total count of the number of instructions executed.
+  // For profiling: 
+  // a total count of the number of instructions executed.
   icount: bigint,
+  // number of cycles
+  ncycles: bigint,
 
   // For SSA (phi-node) execution: keep track of recently-seen labels.j
   curlabel: string | null,
@@ -336,6 +417,7 @@ function evalCall(instr: bril.Operation, state: State): Action {
   }
 
   let newEnv: Env = new Map();
+  let newTaintEnv: TaintEnv = new Map();
 
   // Check arity of arguments and definition.
   let params = func.args || [];
@@ -347,6 +429,8 @@ function evalCall(instr: bril.Operation, state: State): Action {
   for (let i = 0; i < params.length; i++) {
     // Look up the variable in the current (calling) environment.
     let value = get(state.env, args[i]);
+    // Also look up the taint in the current environment.
+    let taint = get_taint(state.taintenv, args[i]);
 
     // Check argument types
     if (!typeCheck(value, params[i].type)) {
@@ -355,20 +439,26 @@ function evalCall(instr: bril.Operation, state: State): Action {
 
     // Set the value of the arg in the new (function) environment.
     newEnv.set(params[i].name, value);
+    // Also set the taint of the arg in the new (function) environment.
+    newTaintEnv.set(params[i].name, taint);
   }
 
   // Invoke the interpreter on the function.
   let newState: State = {
     env: newEnv,
+    taintenv: newTaintEnv,
     heap: state.heap,
     funcs: state.funcs,
     icount: state.icount,
+    ncycles: state.ncycles,
     lastlabel: null,
     curlabel: null,
     specparent: null,  // Speculation not allowed.
   }
+  // TODO: evalFunc should return the taint type of the return value
   let retVal = evalFunc(func, newState);
   state.icount = newState.icount;
+  state.ncycles = newState.ncycles;
 
   // Dynamically check the function's return value and type.
   if (!('dest' in instr)) {  // `instr` is an `EffectOperation`.
@@ -400,6 +490,7 @@ function evalCall(instr: bril.Operation, state: State): Action {
       throw error(`type of value returned by function does not match declaration`);
     }
     state.env.set(instr.dest, retVal);
+    // TODO: set taint type of return value
   }
   return NEXT;
 }
@@ -412,12 +503,13 @@ function evalCall(instr: bril.Operation, state: State): Action {
  */
 function evalInstr(instr: bril.Instruction, state: State): Action {
   state.icount += BigInt(1);
+  let args = instr.args || [];
 
   // Check that we have the right number of arguments.
   if (instr.op !== "const") {
     let count = argCounts[instr.op];
     if (count === undefined) {
-      throw error("unknown opcode " + instr.op);
+      throw error("[argCounts] unknown opcode " + instr.op);
     } else if (count !== null) {
       checkArgs(instr, count);
     }
@@ -434,6 +526,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
   case "const":
     // Interpret JSON numbers as either ints or floats.
     let value: Value;
+    let taint: bril.TaintType;
     if (typeof instr.value === "number") {
       if (instr.type === "float")
         value = instr.value;
@@ -446,12 +539,22 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
       value = instr.value;
     }
 
+    if ("taint" in instr.type) {
+      taint = instr.type.taint;
+    } else {
+      throw error(`taint type not specified for ${instr.type}`);
+    }
+
     state.env.set(instr.dest, value);
+    state.taintenv.set(instr.dest, taint);
     return NEXT;
 
   case "id": {
     let val = getArgument(instr, state.env, 0);
+    let taint = getTaint(instr, state.taintenv, 0);
     state.env.set(instr.dest, val);
+    state.taintenv.set(instr.dest, taint);
+    state.ncycles += BigInt(execCycles["id"]);
     return NEXT;
   }
 
@@ -459,13 +562,45 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let val = getInt(instr, state.env, 0) + getInt(instr, state.env, 1);
     val = BigInt.asIntN(64, val);
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    if (taint0 === "private" || taint1 === "private") {
+      state.taintenv.set(instr.dest, "private");
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    state.ncycles += BigInt(execCycles["id"]);
     return NEXT;
   }
 
   case "mul": {
-    let val = getInt(instr, state.env, 0) * getInt(instr, state.env, 1);
+    // assume mul is unsafe instr
+    let lhs = getInt(instr, state.env, 0);
+    let rhs = getInt(instr, state.env, 1);
+    let val = lhs * rhs;
     val = BigInt.asIntN(64, val);
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // if either of the taints is private, the program leaks private information
+    // except for the case where the other input is a public zero
+    if ((taint0 === "private" && taint1 === "public" && rhs === BigInt(0))
+      || (taint1 === "private" && taint0 === "public" && lhs === BigInt(0))) {
+      // declassify the result
+      state.taintenv.set(instr.dest, "public");
+    } else if (taint0 === "private" || taint1 === "private") {
+      throw error(`leak private data through mul`);
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    // if one of the input is zero, then the execution costs single cycle
+    if (lhs === BigInt(0) || rhs === BigInt(0)) {
+      state.ncycles += BigInt(1);
+    } else {
+      state.ncycles += BigInt(execCycles["mul"]);
+    }
+
     return NEXT;
   }
 
@@ -473,6 +608,15 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let val = getInt(instr, state.env, 0) - getInt(instr, state.env, 1);
     val = BigInt.asIntN(64, val);
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    if (taint0 === "private" || taint1 === "private") {
+      state.taintenv.set(instr.dest, "private");
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    state.ncycles += BigInt(execCycles["sub"]);
     return NEXT;
   }
 
@@ -485,108 +629,391 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let val = lhs / rhs;
     val = BigInt.asIntN(64, val);
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // if either of the taints is private, the program leaks private information
+    // except for the first input is a public zero
+    if (taint0 === "public" && lhs === BigInt(0) && taint1 === "private") {
+      // declassify the result
+      state.taintenv.set(instr.dest, "public");
+    } else if (taint0 === "private" || taint1 === "private") {
+      throw error(`leak private data through div`);
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    // if the first input is zero, then the execution costs single cycle
+    if (lhs === BigInt(0)) {
+      state.ncycles += BigInt(1);
+    } else {
+      state.ncycles += BigInt(execCycles["div"]);
+    }
     return NEXT;
   }
 
   case "le": {
     let val = getInt(instr, state.env, 0) <= getInt(instr, state.env, 1);
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    // except for the case where two inputs are the same variable, the output always true
+    if (args[0] === args[1]) {
+      state.taintenv.set(instr.dest, "public");
+    } else if (taint0 === "private" || taint1 === "private") {
+      state.taintenv.set(instr.dest, "private");
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    state.ncycles += BigInt(execCycles["le"]);
     return NEXT;
   }
 
   case "lt": {
     let val = getInt(instr, state.env, 0) < getInt(instr, state.env, 1);
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    // except for the case where two inputs are the same variable, the output always false
+    if (args[0] === args[1]) {
+      state.taintenv.set(instr.dest, "public");
+    } else if (taint0 === "private" || taint1 === "private") {
+      state.taintenv.set(instr.dest, "private");
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    state.ncycles += BigInt(execCycles["lt"]);
     return NEXT;
   }
 
   case "gt": {
     let val = getInt(instr, state.env, 0) > getInt(instr, state.env, 1);
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    // except for the case where two inputs are the same variable, the output always false
+    if (args[0] === args[1]) {
+      state.taintenv.set(instr.dest, "public");
+    } else if (taint0 === "private" || taint1 === "private") {
+      state.taintenv.set(instr.dest, "private");
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    state.ncycles += BigInt(execCycles["gt"]);
     return NEXT;
   }
 
   case "ge": {
     let val = getInt(instr, state.env, 0) >= getInt(instr, state.env, 1);
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    // except for the case where two inputs are the same variable, the output always true
+    if (args[0] === args[1]) {
+      state.taintenv.set(instr.dest, "public");
+    } else if (taint0 === "private" || taint1 === "private") {
+      state.taintenv.set(instr.dest, "private");
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    state.ncycles += BigInt(execCycles["ge"]);
     return NEXT;
   }
 
   case "eq": {
     let val = getInt(instr, state.env, 0) === getInt(instr, state.env, 1);
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    // except for the case where two inputs are the same variable, the output always true
+    if (args[0] === args[1]) {
+      state.taintenv.set(instr.dest, "public");
+    } else if (taint0 === "private" || taint1 === "private") {
+      state.taintenv.set(instr.dest, "private");
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    state.ncycles += BigInt(execCycles["eq"]);
     return NEXT;
   }
 
   case "not": {
     let val = !getBool(instr, state.env, 0);
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    // if the input is private, the result is private
+    if (taint0 === "private") {
+      state.taintenv.set(instr.dest, "private");
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    state.ncycles += BigInt(execCycles["not"]);
     return NEXT;
   }
 
   case "and": {
-    let val = getBool(instr, state.env, 0) && getBool(instr, state.env, 1);
+    let lhs = getBool(instr, state.env, 0);
+    let rhs = getBool(instr, state.env, 1);
+    let val = lhs && rhs;
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    // except for the case where one of the inputs is public false
+    if ((taint0 === "private" && taint1 === "public" && !rhs)
+      || (taint1 === "private" && taint0 === "public" && !lhs)) {
+      // declassify the result
+      state.taintenv.set(instr.dest, "public");
+    } else if (taint0 === "private" || taint1 === "private") {
+      state.taintenv.set(instr.dest, "private");
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    state.ncycles += BigInt(execCycles["and"]);
+
     return NEXT;
   }
 
   case "or": {
-    let val = getBool(instr, state.env, 0) || getBool(instr, state.env, 1);
+    let lhs = getBool(instr, state.env, 0);
+    let rhs = getBool(instr, state.env, 1);
+    let val = lhs || rhs;
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    // except for the case where one of the inputs is public true
+    if ((taint0 === "private" && taint1 === "public" && rhs)
+      || (taint1 === "private" && taint0 === "public" && lhs)) {
+      // declassify the result
+      state.taintenv.set(instr.dest, "public");
+    } else if (taint0 === "private" || taint1 === "private") {
+      state.taintenv.set(instr.dest, "private");
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    state.ncycles += BigInt(execCycles["or"]);
     return NEXT;
   }
 
+  // assume float operations, it is slower when inputs are subnormal numbers
+  // we use an artifical def of subnormal number (|x| < 1e-10)
   case "fadd": {
-    let val = getFloat(instr, state.env, 0) + getFloat(instr, state.env, 1);
+    let lhs = getFloat(instr, state.env, 0);
+    let rhs = getFloat(instr, state.env, 1);
+    let val = lhs + rhs;
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    if (taint0 === "private" || taint1 === "private") {
+      throw error(`leak private data through fadd`);
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    // if one more input is subnormal, then the execution cost one more times
+    if (isSubnormal(lhs) && isSubnormal(rhs)) {
+      state.ncycles += BigInt(3)*BigInt(execCycles["fadd"]);
+    } else if (isSubnormal(lhs) || isSubnormal(rhs)) {
+      state.ncycles += BigInt(2)*BigInt(execCycles["fadd"]);
+    } else {
+      state.ncycles += BigInt(execCycles["fadd"]);
+    }
     return NEXT;
   }
 
   case "fsub": {
-    let val = getFloat(instr, state.env, 0) - getFloat(instr, state.env, 1);
+    let lhs = getFloat(instr, state.env, 0);
+    let rhs = getFloat(instr, state.env, 1);
+    let val = lhs - rhs;
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    if (taint0 === "private" || taint1 === "private") {
+      throw error(`leak private data through fsub`);
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    // if one more input is subnormal, then the execution cost one more times
+    if (isSubnormal(lhs) && isSubnormal(rhs)) {
+      state.ncycles += BigInt(3)*BigInt(execCycles["fsub"]);
+    } else if (isSubnormal(lhs) || isSubnormal(rhs)) {
+      state.ncycles += BigInt(2)*BigInt(execCycles["fsub"]);
+    } else {
+      state.ncycles += BigInt(execCycles["fsub"]);
+    }
     return NEXT;
   }
 
   case "fmul": {
-    let val = getFloat(instr, state.env, 0) * getFloat(instr, state.env, 1);
+    let lhs = getFloat(instr, state.env, 0);
+    let rhs = getFloat(instr, state.env, 1);
+    let val = lhs * rhs;
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // if either of the taints is private, the program leaks private information
+    if (taint0 === "private" || taint1 === "private") {
+      throw error(`leak private data through fmul`);
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    // if one more input is subnormal, then the execution cost one more times
+    if (isSubnormal(lhs) && isSubnormal(rhs)) {
+      state.ncycles += BigInt(3)*BigInt(execCycles["fmul"]);
+    } else if (isSubnormal(lhs) || isSubnormal(rhs)) {
+      state.ncycles += BigInt(2)*BigInt(execCycles["fmul"]);
+    } else {
+      state.ncycles += BigInt(execCycles["fmul"]);
+    }
     return NEXT;
   }
 
   case "fdiv": {
-    let val = getFloat(instr, state.env, 0) / getFloat(instr, state.env, 1);
+    let lhs = getFloat(instr, state.env, 0);
+    let rhs = getFloat(instr, state.env, 1);
+    let val = lhs / rhs;
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // if either of the taints is private, the program leaks private information
+    if (taint0 === "private" || taint1 === "private") {
+      throw error(`leak private data through fdiv`);
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    // if one more input is subnormal, then the execution cost one more times
+    if (isSubnormal(lhs) && isSubnormal(rhs)) {
+      state.ncycles += BigInt(3)*BigInt(execCycles["fdiv"]);
+    } else if (isSubnormal(lhs) || isSubnormal(rhs)) {
+      state.ncycles += BigInt(2)*BigInt(execCycles["fdiv"]);
+    } else {
+      state.ncycles += BigInt(execCycles["fdiv"]);
+    }
     return NEXT;
   }
 
   case "fle": {
-    let val = getFloat(instr, state.env, 0) <= getFloat(instr, state.env, 1);
+    let lhs = getFloat(instr, state.env, 0);
+    let rhs = getFloat(instr, state.env, 1);
+    let val = lhs <= rhs;
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    if (taint0 === "private" || taint1 === "private") {
+      throw error(`leak private data through fle`);
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    // if one more input is subnormal, then the execution cost one more times
+    if (isSubnormal(lhs) && isSubnormal(rhs)) {
+      state.ncycles += BigInt(3)*BigInt(execCycles["fle"]);
+    } else if (isSubnormal(lhs) || isSubnormal(rhs)) {
+      state.ncycles += BigInt(2)*BigInt(execCycles["fle"]);
+    } else {
+      state.ncycles += BigInt(execCycles["fle"]);
+    }
     return NEXT;
   }
 
   case "flt": {
-    let val = getFloat(instr, state.env, 0) < getFloat(instr, state.env, 1);
+    let lhs = getFloat(instr, state.env, 0);
+    let rhs = getFloat(instr, state.env, 1);
+    let val = lhs < rhs;
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    if (taint0 === "private" || taint1 === "private") {
+      throw error(`leak private data through flt`);
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    // if one more input is subnormal, then the execution cost one more times
+    if (isSubnormal(lhs) && isSubnormal(rhs)) {
+      state.ncycles += BigInt(3)*BigInt(execCycles["flt"]);
+    } else if (isSubnormal(lhs) || isSubnormal(rhs)) {
+      state.ncycles += BigInt(2)*BigInt(execCycles["flt"]);
+    } else {
+      state.ncycles += BigInt(execCycles["flt"]);
+    }
     return NEXT;
   }
 
   case "fgt": {
-    let val = getFloat(instr, state.env, 0) > getFloat(instr, state.env, 1);
+    let lhs = getFloat(instr, state.env, 0);
+    let rhs = getFloat(instr, state.env, 1);
+    let val = lhs > rhs;
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    if (taint0 === "private" || taint1 === "private") {
+      throw error(`leak private data through fgt`);
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    // if one more input is subnormal, then the execution cost one more times
+    if (isSubnormal(lhs) && isSubnormal(rhs)) {
+      state.ncycles += BigInt(3)*BigInt(execCycles["fgt"]);
+    } else if (isSubnormal(lhs) || isSubnormal(rhs)) {
+      state.ncycles += BigInt(2)*BigInt(execCycles["fgt"]);
+    } else {
+      state.ncycles += BigInt(execCycles["fgt"]);
+    }
     return NEXT;
   }
 
   case "fge": {
-    let val = getFloat(instr, state.env, 0) >= getFloat(instr, state.env, 1);
+    let lhs = getFloat(instr, state.env, 0);
+    let rhs = getFloat(instr, state.env, 1);
+    let val = lhs >= rhs;
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    if (taint0 === "private" || taint1 === "private") {
+      throw error(`leak private data through fge`);
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    // if one more input is subnormal, then the execution cost one more times
+    if (isSubnormal(lhs) && isSubnormal(rhs)) {
+      state.ncycles += BigInt(3)*BigInt(execCycles["fge"]);
+    } else if (isSubnormal(lhs) || isSubnormal(rhs)) {
+      state.ncycles += BigInt(2)*BigInt(execCycles["fge"]);
+    } else {
+      state.ncycles += BigInt(execCycles["fge"]);
+    }
     return NEXT;
   }
 
   case "feq": {
-    let val = getFloat(instr, state.env, 0) === getFloat(instr, state.env, 1);
+    let lhs = getFloat(instr, state.env, 0);
+    let rhs = getFloat(instr, state.env, 1);
+    let val = lhs === rhs;
     state.env.set(instr.dest, val);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // one of the taints is private, the result is private
+    if (taint0 === "private" || taint1 === "private") {
+      throw error(`leak private data through feq`);
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    // if one more input is subnormal, then the execution cost one more times
+    if (isSubnormal(lhs) && isSubnormal(rhs)) {
+      state.ncycles += BigInt(3)*BigInt(execCycles["feq"]);
+    } else if (isSubnormal(lhs) || isSubnormal(rhs)) {
+      state.ncycles += BigInt(2)*BigInt(execCycles["feq"]);
+    } else {
+      state.ncycles += BigInt(execCycles["feq"]);
+    }
     return NEXT;
   }
 
@@ -598,14 +1025,17 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
       if (typeof val == "number") { return val.toFixed(17) } else {return val.toString()}}
     );
     console.log(...values);
+    // helper function, no execution time
     return NEXT;
   }
 
   case "jmp": {
+    state.ncycles += BigInt(execCycles["jmp"]);
     return {"action": "jump", "label": getLabel(instr, 0)};
   }
 
   case "br": {
+    state.ncycles += BigInt(execCycles["br"]);
     let cond = getBool(instr, state.env, 0);
     if (cond) {
       return {"action": "jump", "label": getLabel(instr, 0)};
@@ -615,6 +1045,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
   }
 
   case "ret": {
+    state.ncycles += BigInt(execCycles["ret"]);
     let args = instr.args || [];
     if (args.length == 0) {
       return {"action": "end", "ret": null};
@@ -627,14 +1058,18 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
   }
 
   case "nop": {
+    state.ncycles += BigInt(execCycles["nop"]);
     return NEXT;
   }
 
   case "call": {
+    state.ncycles += BigInt(execCycles["call"]);
+    // TODO: pass taint environment to function call
     return evalCall(instr, state);
   }
 
   case "alloc": {
+    state.ncycles += BigInt(execCycles["alloc"]);
     let amt = getInt(instr, state.env, 0);
     let typ = instr.type;
     if (!(typeof typ === "object" && typ.hasOwnProperty('ptr'))) {
@@ -646,6 +1081,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
   }
 
   case "free": {
+    state.ncycles += BigInt(execCycles["free"]);
     let val = getPtr(instr, state.env, 0);
     state.heap.free(val.loc);
     return NEXT;
@@ -654,6 +1090,13 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
   case "store": {
     let target = getPtr(instr, state.env, 0);
     state.heap.write(target.loc, getArgument(instr, state.env, 1, target.type));
+    // store leaks private address data (0)
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    if (taint0 === "private") {
+      throw error(`leak private data through store`);
+    }
+    state.ncycles += BigInt(execCycles["store"]);
+    // TODO: track address for the private data
     return NEXT;
   }
 
@@ -665,6 +1108,14 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     } else {
       state.env.set(instr.dest, val);
     }
+    // load private address data (0)
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    if (taint0 === "private") {
+      throw error(`leak private data through load`);
+    }
+    // TODO: track address for the private data, assume all data loaded is private
+    state.taintenv.set(instr.dest, "private");
+    state.ncycles += BigInt(execCycles["load"]);
     return NEXT;
   }
 
@@ -672,6 +1123,15 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let ptr = getPtr(instr, state.env, 0)
     let val = getInt(instr, state.env, 1)
     state.env.set(instr.dest, { loc: ptr.loc.add(Number(val)), type: ptr.type })
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    // propagate private type
+    if (taint0 === "private" || taint1 === "private") {
+      state.taintenv.set(instr.dest, "private");
+    } else {
+      state.taintenv.set(instr.dest, "public");
+    }
+    state.ncycles += BigInt(execCycles["ptradd"]);
     return NEXT;
   }
 
@@ -684,7 +1144,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (!state.lastlabel) {
       throw error(`phi node executed with no last label`);
     }
-    let idx = labels.indexOf(state.lastlabel);
+    let idx = labels.indexOf(state.lastlabel);  // check last label to know where the execution comes from
     if (idx === -1) {
       // Last label not handled. Leave uninitialized.
       state.env.delete(instr.dest);
@@ -695,12 +1155,16 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
       }
       let src = instr.args[idx];
       let val = state.env.get(src);
+      let taint = state.taintenv.get(src);
       if (val === undefined) {
         state.env.delete(instr.dest);
+        state.taintenv.delete(instr.dest);
       } else {
         state.env.set(instr.dest, val);
+        state.taintenv.set(instr.dest, taint);
       }
     }
+    state.ncycles += BigInt(execCycles["phi"]);
     return NEXT;
   }
 
@@ -724,32 +1188,107 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
   }
 
   case "ceq": {
-    let val = getChar(instr, state.env, 0) === getChar(instr, state.env, 1);
+    let lhs = getChar(instr, state.env, 0);
+    let rhs = getChar(instr, state.env, 1);
+    let val = lhs === rhs;
     state.env.set(instr.dest, val);
+    // propagate private type, except for the case where two inputs are the same variable
+    if (args[0] === args[1]) {
+      state.taintenv.set(instr.dest, "public");
+    } else {
+      let taint0 = getTaint(instr, state.taintenv, 0);
+      let taint1 = getTaint(instr, state.taintenv, 1);
+      if (taint0 === "private" || taint1 === "private") {
+        state.taintenv.set(instr.dest, "private");
+      } else {
+        state.taintenv.set(instr.dest, "public");
+      }
+    }
+    state.ncycles += BigInt(execCycles["ceq"]);
     return NEXT;
   }
 
   case "clt": {
-    let val = getChar(instr, state.env, 0) < getChar(instr, state.env, 1);
+    let lhs = getChar(instr, state.env, 0);
+    let rhs = getChar(instr, state.env, 1);
+    let val = lhs < rhs;
     state.env.set(instr.dest, val);
+    // propagate private type, except for the case where two inputs are the same variable
+    if (args[0] === args[1]) {
+      state.taintenv.set(instr.dest, "public");
+    } else {
+      let taint0 = getTaint(instr, state.taintenv, 0);
+      let taint1 = getTaint(instr, state.taintenv, 1);
+      if (taint0 === "private" || taint1 === "private") {
+        state.taintenv.set(instr.dest, "private");
+      } else {
+        state.taintenv.set(instr.dest, "public");
+      }
+    }
+    state.ncycles += BigInt(execCycles["clt"]);
     return NEXT;
   }
 
   case "cle": {
-    let val = getChar(instr, state.env, 0) <= getChar(instr, state.env, 1);
+    let lhs = getChar(instr, state.env, 0);
+    let rhs = getChar(instr, state.env, 1);
+    let val = lhs <= rhs;
     state.env.set(instr.dest, val);
+    // propagate private type, except for the case where two inputs are the same variable
+    if (args[0] === args[1]) {
+      state.taintenv.set(instr.dest, "public");
+    } else {
+      let taint0 = getTaint(instr, state.taintenv, 0);
+      let taint1 = getTaint(instr, state.taintenv, 1);
+      if (taint0 === "private" || taint1 === "private") {
+        state.taintenv.set(instr.dest, "private");
+      } else {
+        state.taintenv.set(instr.dest, "public");
+      }
+    }
+    state.ncycles += BigInt(execCycles["cle"]);
     return NEXT;
   }
 
   case "cgt": {
-    let val = getChar(instr, state.env, 0) > getChar(instr, state.env, 1);
+    let lhs = getChar(instr, state.env, 0);
+    let rhs = getChar(instr, state.env, 1);
+    let val = lhs > rhs;
     state.env.set(instr.dest, val);
+    // propagate private type, except for the case where two inputs are the same variable
+    if (args[0] === args[1]) {
+      state.taintenv.set(instr.dest, "public");
+    } else {
+      let taint0 = getTaint(instr, state.taintenv, 0);
+      let taint1 = getTaint(instr, state.taintenv, 1);
+      if (taint0 === "private" || taint1 === "private") {
+        state.taintenv.set(instr.dest, "private");
+      } else {
+        state.taintenv.set(instr.dest, "public");
+      }
+    }
+    state.ncycles += BigInt(execCycles["cgt"]);
     return NEXT;
   }
 
   case "cge": {
-    let val = getChar(instr, state.env, 0) >= getChar(instr, state.env, 1);
+    let lhs = getChar(instr, state.env, 0);
+    let rhs = getChar(instr, state.env, 1);
+    let val = lhs >= rhs;
     state.env.set(instr.dest, val);
+    // propagate private type, except for the case where two inputs are the same variable
+    if (args[0] === args[1]) {
+      state.taintenv.set(instr.dest, "public");
+    } else {
+      let taint0 = getTaint(instr, state.taintenv, 0);
+      let taint1 = getTaint(instr, state.taintenv, 1);
+      if (taint0 === "private" || taint1 === "private") {
+        state.taintenv.set(instr.dest, "private");
+      } else {
+        state.taintenv.set(instr.dest, "public");
+      }
+    }
+    state.ncycles += BigInt(execCycles["cge"]);
     return NEXT;
   }
 
@@ -757,6 +1296,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let code = getChar(instr, state.env, 0).codePointAt(0);
     let val = BigInt.asIntN(64, BigInt(code as number));
     state.env.set(instr.dest, val);
+    // directly propagate taint
+    let taint = getTaint(instr, state.taintenv, 0);
+    state.taintenv.set(instr.dest, taint);
+    state.ncycles += BigInt(execCycles["char2int"]);
     return NEXT;
   }
 
@@ -767,6 +1310,9 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     }
     let val = String.fromCodePoint(Number(i));
     state.env.set(instr.dest, val);
+    let taint = getTaint(instr, state.taintenv, 0);
+    state.taintenv.set(instr.dest, taint);
+    state.ncycles += BigInt(execCycles["int2char"]);
     return NEXT;
   }
 
@@ -885,16 +1431,20 @@ function parseNumber(s: string): number {
   }
 }
 
-function parseMainArguments(expected: bril.Argument[], args: string[]) : Env {
+function parseMainArguments(expected: bril.Argument[], args: string[]) : { newEnv: Env, newTaintEnv: TaintEnv } {
   let newEnv: Env = new Map();
+  let newTaintEnv: TaintEnv = new Map();
 
   if (args.length !== expected.length) {
     throw error(`mismatched main argument arity: expected ${expected.length}; got ${args.length}`);
   }
 
   for (let i = 0; i < args.length; i++) {
-    let type = expected[i].type;
-    switch (type) {
+    // let type = expected[i].type;
+    let primetype = expected[i].type.prim;
+    let taint = expected[i].type.taint;
+    newTaintEnv.set(expected[i].name, taint as bril.TaintType);
+    switch (primetype) {
       case "int":
         // https://dev.to/darkmavis1980/you-should-stop-using-parseint-nbf
         let n: bigint = BigInt(Number(args[i]));
@@ -914,7 +1464,7 @@ function parseMainArguments(expected: bril.Argument[], args: string[]) : Env {
         break;
     }
   }
-  return newEnv;
+  return {newEnv: newEnv, newTaintEnv: newTaintEnv};
 }
 
 function evalProg(prog: bril.Program) {
@@ -936,13 +1486,15 @@ function evalProg(prog: bril.Program) {
 
   // Remaining arguments are for the main function.k
   let expected = main.args || [];
-  let newEnv = parseMainArguments(expected, args);
+  let {newEnv, newTaintEnv} = parseMainArguments(expected, args);
 
   let state: State = {
     funcs: prog.functions,
     heap,
     env: newEnv,
+    taintenv: newTaintEnv,
     icount: BigInt(0),
+    ncycles: BigInt(0),
     lastlabel: null,
     curlabel: null,
     specparent: null,
@@ -955,6 +1507,7 @@ function evalProg(prog: bril.Program) {
 
   if (profiling) {
     console.error(`total_dyn_inst: ${state.icount}`);
+    console.error(`total_exec_cycles: ${state.ncycles}`);
   }
 
 }
