@@ -44,59 +44,78 @@ export class Key {
 export class Heap<X> {
 
     private readonly storage: Map<number, X[]>
+    private readonly taint: Map<number, bril.TaintType[]>
     constructor() {
-        this.storage = new Map()
+      this.storage = new Map()
+      this.taint = new Map()
     }
 
     isEmpty(): boolean {
-        return this.storage.size == 0;
+      return (this.storage.size == 0) && (this.taint.size == 0);
     }
 
     private count = 0;
     private getNewBase():number {
-        let val = this.count;
-        this.count++;
-        return val;
+      let val = this.count;
+      this.count++;
+      return val;
     }
 
     private freeKey(key:Key) {
-        return;
+      return;
     }
 
     alloc(amt:number): Key {
-        if (amt <= 0) {
-            throw error(`cannot allocate ${amt} entries`);
-        }
-        let base = this.getNewBase();
-        this.storage.set(base, new Array(amt))
-        return new Key(base, 0);
+      if (amt <= 0) {
+          throw error(`cannot allocate ${amt} entries`);
+      }
+      let base = this.getNewBase();
+      this.storage.set(base, new Array(amt))
+      this.taint.set(base, new Array(amt))
+      return new Key(base, 0);
     }
 
     free(key: Key) {
-        if (this.storage.has(key.base) && key.offset == 0) {
-            this.freeKey(key);
-            this.storage.delete(key.base);
-        } else {
-            throw error(`Tried to free illegal memory location base: ${key.base}, offset: ${key.offset}. Offset must be 0.`);
-        }
+      if (this.storage.has(key.base) && key.offset == 0) {
+        this.freeKey(key);
+        this.storage.delete(key.base);
+        this.taint.delete(key.base);
+      } else {
+        throw error(`Tried to free illegal memory location base: ${key.base}, offset: ${key.offset}. Offset must be 0.`);
+      }
     }
 
-    write(key: Key, val: X) {
-        let data = this.storage.get(key.base);
-        if (data && data.length > key.offset && key.offset >= 0) {
-            data[key.offset] = val;
-        } else {
-            throw error(`Uninitialized heap location ${key.base} and/or illegal offset ${key.offset}`);
-        }
+    write(key: Key, val: X, taint: bril.TaintType) {
+      let data = this.storage.get(key.base);
+      if (data && data.length > key.offset && key.offset >= 0) {
+        data[key.offset] = val;
+      } else {
+        throw error(`Uninitialized heap location ${key.base} and/or illegal offset ${key.offset}`);
+      }
+      let taintData = this.taint.get(key.base);
+      if (taintData && taintData.length > key.offset && key.offset >= 0) {
+        taintData[key.offset] = taint;
+      } else {
+        throw error(`Uninitialized taint location ${key.base} and/or illegal offset ${key.offset}`);
+      }
     }
 
-    read(key: Key): X {
-        let data = this.storage.get(key.base);
-        if (data && data.length > key.offset && key.offset >= 0) {
-            return data[key.offset];
-        } else {
-            throw error(`Uninitialized heap location ${key.base} and/or illegal offset ${key.offset}`);
-        }
+    read(key: Key): {retVal: X, retTaint: bril.TaintType} {
+      let data = this.storage.get(key.base);
+      let retVal: X;
+      let retTaint: bril.TaintType;
+      if (data && data.length > key.offset && key.offset >= 0) {
+        retVal = data[key.offset];
+      } else {
+        throw error(`Uninitialized heap location ${key.base} and/or illegal offset ${key.offset}`);
+      }
+      let taintData = this.taint.get(key.base);
+      if (taintData && taintData.length > key.offset && key.offset >= 0) {
+        retTaint = taintData[key.offset];
+      } else {
+        throw error(`Uninitialized taint location ${key.base} and/or illegal offset ${key.offset}`);
+      }
+      return {retVal, retTaint};
     }
 }
 
@@ -526,6 +545,8 @@ function evalCall(instr: bril.Operation, state: State): Action {
  * instruction or "end" to terminate the function.
  */
 function evalInstr(instr: bril.Instruction, state: State): Action {
+  // DEBUG: print the instruction
+  // console.log(instr);
   state.icount += BigInt(1);
   let args = instr.args || [];
 
@@ -563,10 +584,11 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
       value = instr.value;
     }
 
-    if ("taint" in instr.type) {
+    if (typeof instr.type === 'object' && 'taint' in instr.type) {
       taint = instr.type.taint;
     } else {
-      throw error(`taint type not specified for ${instr.type}`);
+      // if not specify, the const is public
+      taint = "public";
     }
 
     state.env.set(instr.dest, value);
@@ -1304,6 +1326,8 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     }
     let ptr = alloc(typ, Number(amt), state.heap);
     state.env.set(instr.dest, ptr);
+    // alloc returns public type
+    state.taintenv.set(instr.dest, "public");
     return NEXT;
   }
 
@@ -1316,32 +1340,31 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
 
   case "store": {
     let target = getPtr(instr, state.env, 0);
-    state.heap.write(target.loc, getArgument(instr, state.env, 1, target.type));
-    // store leaks private address data (0)
     let taint0 = getTaint(instr, state.taintenv, 0);
+    let taint1 = getTaint(instr, state.taintenv, 1);
+    state.heap.write(target.loc, getArgument(instr, state.env, 1, target.type), taint1);
+    // store leaks private address data (0)
     if (taint0 === "private") {
       throw error(`leak private data through store`);
     }
     state.ncycles += BigInt(execCycles["store"]);
-    // TODO: track address for the private data
     return NEXT;
   }
 
   case "load": {
     let ptr = getPtr(instr, state.env, 0);
-    let val = state.heap.read(ptr.loc);
-    if (val === undefined || val === null) {
+    let {retVal, retTaint} = state.heap.read(ptr.loc);
+    if (retVal === undefined || retVal === null || retTaint === undefined || retTaint === null) {
       throw error(`Pointer ${instr.args![0]} points to uninitialized data`);
     } else {
-      state.env.set(instr.dest, val);
+      state.env.set(instr.dest, retVal);
+      state.taintenv.set(instr.dest, retTaint);
     }
     // load private address data (0)
     let taint0 = getTaint(instr, state.taintenv, 0);
     if (taint0 === "private") {
       throw error(`leak private data through load`);
     }
-    // TODO: track address for the private data, assume all data loaded is private
-    state.taintenv.set(instr.dest, "private");
     state.ncycles += BigInt(execCycles["load"]);
     return NEXT;
   }

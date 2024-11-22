@@ -1,6 +1,25 @@
-@main(input: int) {
+@testfunc(size: int) : int {
+    arr: ptr<int> = alloc size;
     pubdata: prim<int>, taint<public> = const 1;
     secdata: prim<int>, taint<private> = const 2;
-    result: int = add pubdata secdata;
+    pubidx: int = const 0;
+    secidx: int = const 1;
+    publoc: ptr<int> = ptradd arr pubidx;
+    secloc: ptr<int> = ptradd arr secidx;
+    store publoc pubdata;
+    store secloc secdata;
+    pubload: int = load publoc;
+    secload: int = load secloc;
+    result: int = add pubload secload;
+    free arr;
+    ret result;
+}
+
+@main(pubdata: prim<float>, taint<public>, secdata: prim<float>, taint<private>) {
+    result: float = fadd_ct pubdata secdata;
+    size: prim<int>, taint<public> = const 4;
+    callret: int = call @testfunc size;
+    callret: int = mul_ct callret callret;
+    print callret;
     ret result;
 }
