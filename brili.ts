@@ -376,7 +376,7 @@ function getFunc(instr: bril.Operation, index: number): bril.Ident {
 type Action =
   {"action": "next"} |  // Normal execution: just proceed to next instruction.
   {"action": "jump", "label": bril.Ident} |
-  {"action": "end", "ret": Value | null} |
+  {"action": "end", "ret": Value | null, "taint": bril.TaintType | null} |
   {"action": "speculate"} |
   {"action": "commit"} |
   {"action": "abort", "label": bril.Ident};
@@ -455,8 +455,7 @@ function evalCall(instr: bril.Operation, state: State): Action {
     curlabel: null,
     specparent: null,  // Speculation not allowed.
   }
-  // TODO: evalFunc should return the taint type of the return value
-  let retVal = evalFunc(func, newState);
+  let {retVal, retTaint} = evalFunc(func, newState);
   state.icount = newState.icount;
   state.ncycles = newState.ncycles;
 
@@ -489,8 +488,11 @@ function evalCall(instr: bril.Operation, state: State): Action {
     if (!typeCmp(instr.type, func.type)) {
       throw error(`type of value returned by function does not match declaration`);
     }
+    if (retTaint === null) {
+      throw error(`non-void function (type: ${func.type}) doesn't return any taint`);
+    }
     state.env.set(instr.dest, retVal);
-    // TODO: set taint type of return value
+    state.taintenv.set(instr.dest, retTaint);
   }
   return NEXT;
 }
@@ -1048,10 +1050,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     state.ncycles += BigInt(execCycles["ret"]);
     let args = instr.args || [];
     if (args.length == 0) {
-      return {"action": "end", "ret": null};
+      return {"action": "end", "ret": null, "taint": null};
     } else if (args.length == 1) {
       let val = get(state.env, args[0]);
-      return {"action": "end", "ret": val};
+      return {"action": "end", "ret": val, "taint": getTaint(instr, state.taintenv, 0)};
     } else {
       throw error(`ret takes 0 or 1 argument(s); got ${args.length}`);
     }
@@ -1064,7 +1066,6 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
 
   case "call": {
     state.ncycles += BigInt(execCycles["call"]);
-    // TODO: pass taint environment to function call
     return evalCall(instr, state);
   }
 
@@ -1321,7 +1322,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
   throw error(`unhandled opcode ${(instr as any).op}`);
 }
 
-function evalFunc(func: bril.Function, state: State): Value | null {
+function evalFunc(func: bril.Function, state: State): { retVal: Value | null, retTaint: bril.TaintType | null } {
   for (let i = 0; i < func.instrs.length; ++i) {
     let line = func.instrs[i];
     if ('op' in line) {
@@ -1332,7 +1333,7 @@ function evalFunc(func: bril.Function, state: State): Value | null {
       switch (action.action) {
       case 'end': {
         // Return from this function.
-        return action.ret;
+        return {retVal: action.ret, retTaint: action.taint};
       }
       case 'speculate': {
         // Begin speculation.
