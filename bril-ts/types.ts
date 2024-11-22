@@ -88,6 +88,8 @@ export const OP_SIGS: {[key: string]: Signature | PolySignature} = {
   'br': {args: ['bool'], 'labels': 2},
   'id': {tvar: {tv: 'T'}, sig: {args: [{tv: 'T'}], dest: {tv: 'T'}}},
   'nop': {args: []},
+  'mul_ct': {args: ['int', 'int'], dest: 'int'},
+  'div_ct': {args: ['int', 'int'], dest: 'int'},
 
   // Floating point.
   'fadd': {args: ['float', 'float'], dest: 'float'},
@@ -99,6 +101,15 @@ export const OP_SIGS: {[key: string]: Signature | PolySignature} = {
   'fgt': {args: ['float', 'float'], dest: 'bool'},
   'fle': {args: ['float', 'float'], dest: 'bool'},
   'fge': {args: ['float', 'float'], dest: 'bool'},
+  'fadd_ct': {args: ['float', 'float'], dest: 'float'},
+  'fmul_ct': {args: ['float', 'float'], dest: 'float'},
+  'fsub_ct': {args: ['float', 'float'], dest: 'float'},
+  'fdiv_ct': {args: ['float', 'float'], dest: 'float'},
+  'feq_ct': {args: ['float', 'float'], dest: 'bool'},
+  'flt_ct': {args: ['float', 'float'], dest: 'bool'},
+  'fle_ct': {args: ['float', 'float'], dest: 'bool'},
+  'fgt_ct': {args: ['float', 'float'], dest: 'bool'},
+  'fge_ct': {args: ['float', 'float'], dest: 'bool'},
 
   // Memory.
   'alloc': {tvar: {tv: 'T'}, sig: {args: ['int'], dest: {ptr: {tv: 'T'}}}},

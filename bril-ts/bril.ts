@@ -57,12 +57,15 @@ export interface EffectOperation extends Op {
  */
 export interface ValueOperation extends Op {
   op: "add" | "mul" | "sub" | "div" |
+      "mul_ct" | "div_ct" |
       "id" | "nop" |
       "eq" | "lt" | "gt" | "ge" | "le" | "not" | "and" | "or" |
       "call" |
       "load" | "ptradd" | "alloc" |
       "fadd" | "fmul" | "fsub" | "fdiv" |
       "feq" | "flt" | "fle" | "fgt" | "fge" |
+      "fadd_ct" | "fmul_ct" | "fsub_ct" | "fdiv_ct" |
+      "feq_ct" | "flt_ct" | "fle_ct" | "fgt_ct" | "fge_ct" |
       "ceq" | "clt" | "cle" | "cgt" | "cge" | 
       "char2int" | "int2char" |
       "phi";
