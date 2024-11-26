@@ -1288,6 +1288,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
   case "br": {
     state.ncycles += BigInt(execCycles["br"]);
     let cond = getBool(instr, state.env, 0);
+    let taint0 = getTaint(instr, state.taintenv, 0);
+    if (taint0 === "private") {
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${cond}, ${taint0})`);
+    }
     if (cond) {
       return {"action": "jump", "label": getLabel(instr, 0)};
     } else {
