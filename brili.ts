@@ -593,6 +593,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
 
     state.env.set(instr.dest, value);
     state.taintenv.set(instr.dest, taint);
+    state.ncycles += BigInt(execCycles["id"]);  // const runs same amount of cycles as id
     return NEXT;
 
   case "id": {
@@ -636,7 +637,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
       // declassify the result
       state.taintenv.set(instr.dest, "public");
     } else if (taint0 === "private" || taint1 === "private") {
-      throw error(`leak private data through mul`);
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${lhs}, ${taint0}), ${instr.args[1]}(${rhs}, ${taint1})`);
     } else {
       state.taintenv.set(instr.dest, "public");
     }
@@ -708,7 +709,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
       // declassify the result
       state.taintenv.set(instr.dest, "public");
     } else if (taint0 === "private" || taint1 === "private") {
-      throw error(`leak private data through div`);
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${lhs}, ${taint0}), ${instr.args[1]}(${rhs}, ${taint1})`);
     } else {
       state.taintenv.set(instr.dest, "public");
     }
@@ -907,7 +908,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let taint1 = getTaint(instr, state.taintenv, 1);
     // one of the taints is private, the result is private
     if (taint0 === "private" || taint1 === "private") {
-      throw error(`leak private data through fadd`);
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${lhs}, ${taint0}), ${instr.args[1]}(${rhs}, ${taint1})`);
     } else {
       state.taintenv.set(instr.dest, "public");
     }
@@ -948,7 +949,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let taint1 = getTaint(instr, state.taintenv, 1);
     // one of the taints is private, the result is private
     if (taint0 === "private" || taint1 === "private") {
-      throw error(`leak private data through fsub`);
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${lhs}, ${taint0}), ${instr.args[1]}(${rhs}, ${taint1})`);
     } else {
       state.taintenv.set(instr.dest, "public");
     }
@@ -989,7 +990,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let taint1 = getTaint(instr, state.taintenv, 1);
     // if either of the taints is private, the program leaks private information
     if (taint0 === "private" || taint1 === "private") {
-      throw error(`leak private data through fmul`);
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${lhs}, ${taint0}), ${instr.args[1]}(${rhs}, ${taint1})`);
     } else {
       state.taintenv.set(instr.dest, "public");
     }
@@ -1030,7 +1031,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let taint1 = getTaint(instr, state.taintenv, 1);
     // if either of the taints is private, the program leaks private information
     if (taint0 === "private" || taint1 === "private") {
-      throw error(`leak private data through fdiv`);
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${lhs}, ${taint0}), ${instr.args[1]}(${rhs}, ${taint1})`);
     } else {
       state.taintenv.set(instr.dest, "public");
     }
@@ -1054,7 +1055,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let taint1 = getTaint(instr, state.taintenv, 1);
     // if either of the taints is private, the program leaks private information
     if (taint0 === "private" || taint1 === "private") {
-      throw error(`leak private data through fdiv`);
+      state.taintenv.set(instr.dest, "private");
     } else {
       state.taintenv.set(instr.dest, "public");
     }
@@ -1071,7 +1072,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let taint1 = getTaint(instr, state.taintenv, 1);
     // one of the taints is private, the result is private
     if (taint0 === "private" || taint1 === "private") {
-      throw error(`leak private data through fle`);
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${lhs}, ${taint0}), ${instr.args[1]}(${rhs}, ${taint1})`);
     } else {
       state.taintenv.set(instr.dest, "public");
     }
@@ -1112,7 +1113,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let taint1 = getTaint(instr, state.taintenv, 1);
     // one of the taints is private, the result is private
     if (taint0 === "private" || taint1 === "private") {
-      throw error(`leak private data through flt`);
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${lhs}, ${taint0}), ${instr.args[1]}(${rhs}, ${taint1})`);
     } else {
       state.taintenv.set(instr.dest, "public");
     }
@@ -1153,7 +1154,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let taint1 = getTaint(instr, state.taintenv, 1);
     // one of the taints is private, the result is private
     if (taint0 === "private" || taint1 === "private") {
-      throw error(`leak private data through fgt`);
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${lhs}, ${taint0}), ${instr.args[1]}(${rhs}, ${taint1})`);
     } else {
       state.taintenv.set(instr.dest, "public");
     }
@@ -1194,7 +1195,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let taint1 = getTaint(instr, state.taintenv, 1);
     // one of the taints is private, the result is private
     if (taint0 === "private" || taint1 === "private") {
-      throw error(`leak private data through fge`);
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${lhs}, ${taint0}), ${instr.args[1]}(${rhs}, ${taint1})`);
     } else {
       state.taintenv.set(instr.dest, "public");
     }
@@ -1235,7 +1236,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     let taint1 = getTaint(instr, state.taintenv, 1);
     // one of the taints is private, the result is private
     if (taint0 === "private" || taint1 === "private") {
-      throw error(`leak private data through feq`);
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${lhs}, ${taint0}), ${instr.args[1]}(${rhs}, ${taint1})`);
     } else {
       state.taintenv.set(instr.dest, "public");
     }
@@ -1275,7 +1276,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
       if (typeof val == "number") { return val.toFixed(17) } else {return val.toString()}}
     );
     console.log(...values);
-    // helper function, no execution time
+    state.ncycles += BigInt(execCycles["print"]);
     return NEXT;
   }
 
@@ -1340,12 +1341,13 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
 
   case "store": {
     let target = getPtr(instr, state.env, 0);
+    let value = getArgument(instr, state.env, 1, target.type);
     let taint0 = getTaint(instr, state.taintenv, 0);
     let taint1 = getTaint(instr, state.taintenv, 1);
-    state.heap.write(target.loc, getArgument(instr, state.env, 1, target.type), taint1);
+    state.heap.write(target.loc, value, taint1);
     // store leaks private address data (0)
     if (taint0 === "private") {
-      throw error(`leak private data through store`);
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${target}, ${taint0}), ${instr.args[1]}(${value}, ${taint1})`);
     }
     state.ncycles += BigInt(execCycles["store"]);
     return NEXT;
@@ -1363,7 +1365,7 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     // load private address data (0)
     let taint0 = getTaint(instr, state.taintenv, 0);
     if (taint0 === "private") {
-      throw error(`leak private data through load`);
+      throw error(`leak private data through ${instr.op} ${instr.args[0]}(${ptr}, ${taint0})`);
     }
     state.ncycles += BigInt(execCycles["load"]);
     return NEXT;
@@ -1690,9 +1692,15 @@ function parseMainArguments(expected: bril.Argument[], args: string[]) : { newEn
   }
 
   for (let i = 0; i < args.length; i++) {
-    // let type = expected[i].type;
     let primetype = expected[i].type.prim;
+    if (primetype === undefined) {
+      primetype = expected[i].type;
+    }
     let taint = expected[i].type.taint;
+    // for main func args, if taint is not specified, default to private
+    if (taint === undefined) {
+      taint = "private";
+    }
     newTaintEnv.set(expected[i].name, taint as bril.TaintType);
     switch (primetype) {
       case "int":
