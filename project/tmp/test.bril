@@ -1,0 +1,25 @@
+@testfunc(size.1: int): int {
+.dummy_entry:
+.entry:
+  arr.1: ptr<int> = alloc size.1;
+  pubdata.1: prim<int>, taint<public> = const 1;
+  secdata.1: prim<int>, taint<private> = const 2;
+  pubidx.1: int = const 0;
+  secidx.1: int = id pubdata.1;
+  publoc.1: ptr<int> = ptradd arr.1 pubidx.1;
+  secloc.1: ptr<int> = ptradd arr.1 secidx.1;
+  store publoc.1 pubdata.1;
+  store secloc.1 secdata.1;
+  pubload.1: int = load publoc.1;
+  secload.1: int = load secloc.1;
+  result.1: int = add pubload.1 secload.1;
+  free arr.1;
+  ret result.1;
+}
+@main {
+.entry:
+  size.1: prim<int>, taint<public> = const 4;
+  callret.1: int = call @testfunc size.1;
+  callret.2: int = mul_ct callret.1 callret.1;
+  ret callret.2;
+}

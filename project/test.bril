@@ -15,11 +15,9 @@
     ret result;
 }
 
-@main(pubdata: prim<float>, taint<public>, secdata: prim<float>, taint<private>) {
-    result: float = fadd_ct pubdata secdata;
+@main() {
     size: prim<int>, taint<public> = const 4;
     callret: int = call @testfunc size;
     callret: int = mul_ct callret callret;
-    print callret;
-    ret result;
+    ret callret;
 }
