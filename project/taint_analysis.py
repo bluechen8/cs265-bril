@@ -118,34 +118,40 @@ def taint_func(fn, func_dict, return_prog):
                                     else:
                                         arg['type'] = {'prim': arg['type'],'taint': input_args_taint[arg_id]}
                                 dest_taint = taint_func(func_v, func_dict, return_prog)
+                                if 'dest' in instr:
+                                    taint_dict[instr['dest']] = dest_taint
                                 func_dict[instr['funcs'][0]][1].append((func_v, dest_taint))
                                 if DEBUG:
                                     print(f"-----Back Function {fn['name']}-----")
-
-                        # check args taint
-                        private_flag = False
-                        if 'args' in instr:
-                            for arg in instr['args']:
-                                if arg in taint_dict:
-                                    if taint_dict[arg] == 'private':
+                        elif instr['op'] == 'load':
+                            # conservative approach: if load, we assume it is private
+                            taint_dict[instr['dest']] = 'private'
+                        else:
+                            # other instructions
+                            # check args taint
+                            private_flag = False
+                            if 'args' in instr:
+                                for arg in instr['args']:
+                                    if arg in taint_dict:
+                                        if taint_dict[arg] == 'private':
+                                            private_flag = True
+                                            break
+                                    else:
+                                        # if arg is not in taint dict,
+                                        # we assume it is private
                                         private_flag = True
                                         break
-                                else:
-                                    # if arg is not in taint dict,
-                                    # we assume it is private
-                                    private_flag = True
-                                    break
-                        else:
-                            # if no args, it should be const or nop
-                            # for const, we assume it is public
-                            assert instr['op'] in NO_ARGS_INST
-                        
-                        # check dest
-                        if 'dest' in instr:
-                            if private_flag:
-                                taint_dict[instr['dest']] = 'private'
                             else:
-                                taint_dict[instr['dest']] = 'public'
+                                # if no args, it should be const or nop
+                                # for const, we assume it is public
+                                assert instr['op'] in NO_ARGS_INST
+                            
+                            # check dest
+                            if 'dest' in instr:
+                                if private_flag:
+                                    taint_dict[instr['dest']] = 'private'
+                                else:
+                                    taint_dict[instr['dest']] = 'public'
         # if taint_dict changed, then update successor in and add to worklist
         if DEBUG:
             print(f"OUT: {taint_dict}")
