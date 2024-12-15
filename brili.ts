@@ -3,6 +3,7 @@ import {readStdin, unreachable} from './bril-ts/util.ts';
 
 let static_taint_check = false;
 let safe_code_check = false;
+let debug_mode = false;
 
 /**
  * An interpreter error to print to the console.
@@ -441,7 +442,9 @@ type State = {
   // number of cycles
   ncycles: bigint,
   // number of mild misstaints (public data classified as private)
-  nmisstaints: bigint,
+  nmisspub: bigint,
+  // number of severe misstaints (private data classified as public)
+  nmisspriv: bigint,
 
   // For SSA (phi-node) execution: keep track of recently-seen labels.j
   curlabel: string | null,
@@ -483,16 +486,19 @@ function evalCall(instr: bril.Operation, state: State): Action {
     let param_taint = null;
     if (typeof params[i].type === 'object') {
       if (params[i].type.hasOwnProperty('ptr')) {
-        param_type = params[i].type.ptr;
+        param_type = {'ptr': params[i].type.ptr};
       } else {
         param_type = params[i].type.prim;
       }
       param_taint = params[i].type.taint;
+    } else {
+      param_type = params[i].type;
     }
     if (!typeCheck(value, param_type)) {
       throw error(`function argument type mismatch`);
     }
-    if (param_taint !== null && taint !== param_taint) {
+    if (param_taint !== undefined && param_taint !== null && taint !== param_taint) {
+      console.log(param_taint, taint);
       throw error(`function argument taint mismatch`);
     }
 
@@ -510,7 +516,8 @@ function evalCall(instr: bril.Operation, state: State): Action {
     funcs: state.funcs,
     icount: state.icount,
     ncycles: state.ncycles,
-    nmisstaints: state.nmisstaints,
+    nmisspub: state.nmisspub,
+    nmisspriv: state.nmisspriv,
     lastlabel: null,
     curlabel: null,
     specparent: null,  // Speculation not allowed.
@@ -518,7 +525,8 @@ function evalCall(instr: bril.Operation, state: State): Action {
   let {retVal, retTaint} = evalFunc(func, newState);
   state.icount = newState.icount;
   state.ncycles = newState.ncycles;
-  state.nmisstaints = newState.nmisstaints;
+  state.nmisspub = newState.nmisspub;
+  state.nmisspriv = newState.nmisspriv;
 
   // Dynamically check the function's return value and type.
   if (!('dest' in instr)) {  // `instr` is an `EffectOperation`.
@@ -544,11 +552,13 @@ function evalCall(instr: bril.Operation, state: State): Action {
     let instr_taint: bril.TaintType = null;
     if (typeof instr.type === 'object') {
       if (instr.type.hasOwnProperty('ptr')) {
-        instr_type = instr.type.ptr;
+        instr_type = {'ptr': instr.type.ptr};
       } else {
         instr_type = instr.type.prim;
       }
       instr_taint = instr.type.taint;
+    } else {
+      instr_type = instr.type;
     }
     if (!typeCheck(retVal, instr_type)) {
       throw error(`type of value returned by function does not match destination type`);
@@ -565,10 +575,11 @@ function evalCall(instr: bril.Operation, state: State): Action {
     if (static_taint_check && instr_taint !== null && retTaint !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${retVal}, ${retTaint}) does not match destination taint ${instr_taint}`);
       } else {
-        throw error(`taint of value ${instr.dest}(${retVal}, ${retTaint}) does not match destination taint ${instr_taint}`);
+        state.nmisspriv += BigInt(1);
+        console.log(`taint of value ${instr.dest}(${retVal}, ${retTaint}) does not match destination taint ${instr_taint}`);
       }
     }
     state.env.set(instr.dest, retVal);
@@ -584,6 +595,9 @@ function evalCall(instr: bril.Operation, state: State): Action {
  * instruction or "end" to terminate the function.
  */
 function evalInstr(instr: bril.Instruction, state: State): Action {
+  if (debug_mode) {
+    console.log("instr:", instr);
+  }
   state.icount += BigInt(1);
   let args = instr.args || [];
 
@@ -645,10 +659,11 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && taint !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${taint}) does not match destination taint ${instr_taint}`);
       } else {
-        throw error(`taint of value ${instr.dest}(${val}, ${taint}) does not match destination taint ${instr_taint}`);
+        state.nmisspriv += BigInt(1);
+        console.log(`taint of value ${instr.dest}(${val}, ${taint}) does not match destination taint ${instr_taint}`);
       }
     }
     state.env.set(instr.dest, val);
@@ -672,9 +687,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -709,9 +725,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -748,9 +765,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -774,9 +792,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -812,9 +831,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -851,9 +871,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -879,9 +900,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -906,9 +928,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -933,9 +956,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -960,9 +984,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -987,9 +1012,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1010,9 +1036,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1041,9 +1068,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1073,9 +1101,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1105,9 +1134,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1138,9 +1168,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1168,9 +1199,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1201,9 +1233,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1231,9 +1264,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1264,9 +1298,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1294,9 +1329,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1327,9 +1363,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1357,9 +1394,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1390,9 +1428,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1420,9 +1459,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1453,9 +1493,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1483,9 +1524,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1516,9 +1558,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1599,9 +1642,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1632,9 +1676,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1747,9 +1792,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${retVal}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${retVal}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1777,9 +1823,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1820,9 +1867,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
       if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
         console.log('Taint violate:', instr);
         if (instr_taint === 'private') {
-          state.nmisstaints += BigInt(1);
+          state.nmisspub += BigInt(1);
           console.log(`taint of value ${instr.dest}(${taint}) does not match destination taint ${instr_taint}`);
         } else {
+          state.nmisspriv += BigInt(1);
           throw error(`taint of value ${instr.dest}(${taint}) does not match destination taint ${instr_taint}`);
         }
       }
@@ -1870,9 +1918,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1900,9 +1949,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1930,9 +1980,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1960,9 +2011,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -1990,9 +2042,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -2010,9 +2063,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && state.taintenv.get(instr.dest) !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -2032,9 +2086,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     if (static_taint_check && instr_taint !== null && taint !== instr_taint) {
       console.log('Taint violate:', instr);
       if (instr_taint === 'private') {
-        state.nmisstaints += BigInt(1);
+        state.nmisspub += BigInt(1);
         console.log(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       } else {
+        state.nmisspriv += BigInt(1);
         throw error(`taint of value ${instr.dest}(${val}, ${state.taintenv.get(instr.dest)}) does not match destination taint ${instr_taint}`);
       }
     }
@@ -2121,7 +2176,7 @@ function evalFunc(func: bril.Function, state: State): { retVal: Value | null, re
   if (state.specparent) {
     throw error(`implicit return in speculative state`);
   }
-  return null;
+  return {retVal: null, retTaint: null};
 }
 
 function parseChar(s: string): string {
@@ -2227,6 +2282,12 @@ function evalProg(prog: bril.Program) {
     safe_code_check = true;
     args.splice(safe_code_check_idx, 1);
   }
+  let debug_idx = args.indexOf('-debug');
+  if (debug_idx > -1) {
+    console.log('[+] Debug mode enabled');
+    debug_mode = true;
+    args.splice(debug_idx, 1);
+  }
 
   // Remaining arguments are for the main function.k
   let expected = main.args || [];
@@ -2239,7 +2300,8 @@ function evalProg(prog: bril.Program) {
     taintenv: newTaintEnv,
     icount: BigInt(0),
     ncycles: BigInt(0),
-    nmisstaints: BigInt(0),
+    nmisspub: BigInt(0),
+    nmisspriv: BigInt(0),
     lastlabel: null,
     curlabel: null,
     specparent: null,
@@ -2254,7 +2316,8 @@ function evalProg(prog: bril.Program) {
     console.error(`total_dyn_inst: ${state.icount}`);
     console.error(`total_exec_cycles: ${state.ncycles}`);
     if (static_taint_check) {
-      console.error(`total_misstaints: ${state.nmisstaints}`);
+      console.error(`total_misspub: ${state.nmisspub}`);
+      console.error(`total_misspriv: ${state.nmisspriv}`);
     }
   }
 
