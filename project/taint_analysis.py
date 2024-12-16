@@ -4,6 +4,7 @@ import copy
 from block_gen import block_gen
 
 NO_ARGS_INST = ['nop', 'ret', 'jmp', 'br', 'const']
+func_call_stack = []
 
 def union_dicts(dicts):
     if len(dicts) == 0:
@@ -13,12 +14,52 @@ def union_dicts(dicts):
         common_items |= set(d.items())
     return dict(common_items)
 
+# return func_id, func_v, dest_taint
+def check_func_args_taint(func_dict, func_name, args_taint):
+    if DEBUG:
+        print(f"----- Checking Function {func_name} input taints-----")
+    if len(args_taint) == 0:
+        if len(func_dict[func_name][1]) == 1:
+            assert 'args' not in func_dict[func_name][1][0][0]
+            return 0, func_dict[func_name][1][0][0], func_dict[func_name][1][0][1]
+        return None, None, None
+    else:
+        for func_id, (func_v, dest_taint) in enumerate(func_dict[func_name][1]):
+            # check if the input args taints match
+            if DEBUG:
+                print(f"Checking {args_taint} <-> {[arg['type']['taint'] for arg in func_v['args']]}")
+            if args_taint == [arg['type']['taint'] for arg in func_v['args']]:
+                if DEBUG:
+                    print(f"Existing version matches, return dest taint: {dest_taint}")
+                return func_id, func_v, dest_taint
+        return None, None, None
+
+def write_func_args_taint(func_dict, func_name, args_taint, correct_func_v, correct_taint):
+    if DEBUG:
+        print(f"----- Checking Function {func_name} input taints for update it-----")
+    if len(args_taint) == 0:
+        if len(func_dict[func_name][1]) == 1:
+            assert 'args' not in func_dict[func_name][1][0][0]
+            func_dict[func_name][2][0][1] = True
+            return True
+        return False
+    else:
+        for func_id, (func_v, _) in enumerate(func_dict[func_name][1]):
+            # check if the input args taints match
+            if DEBUG:
+                print(f"Checking {args_taint} <-> {[arg['type']['taint'] for arg in func_v['args']]}")
+            if args_taint == [arg['type']['taint'] for arg in func_v['args']]:
+                func_dict[func_name][1][func_id][0] = correct_func_v
+                func_dict[func_name][1][func_id][1] = correct_taint
+                func_dict[func_name][2][func_id][1] = True
+                return True
+        return False
 
 def taint_analysis(prog):
     return_prog = {"functions": []}
     # dict to track different version of func
     # each version has args with distinct taints
-    # func1: (func1, [(func1_v1,ret_taint), (func1_v2,ret_taint), ...])
+    # func1: (func1, [(func1_v1,ret_taint), (func1_v2,ret_taint), ...], [bit if func is added, bit if func is tainted])
     func_dict = {}
     for fn in prog['functions']:
         # pull out the main func
@@ -26,7 +67,7 @@ def taint_analysis(prog):
             return_prog['functions'].append(copy.deepcopy(fn))
         else:
             # add other func to func dict
-            func_dict[fn['name']] = (fn, [])
+            func_dict[fn['name']] = (fn, [], [])
     # start parse main
     main_func = return_prog['functions'][0]
     # args to main are always private
@@ -40,7 +81,10 @@ def taint_analysis(prog):
             else:
                 arg['type'] = {'prim': arg['type'],'taint': 'private'}
     # start taint analysis
+    func_call_stack.append('main')
     taint_func(main_func, func_dict, return_prog)
+    func_call_stack.pop()
+    assert len(func_call_stack) == 0
     return return_prog
 
 
@@ -89,40 +133,55 @@ def taint_func(fn, func_dict, return_prog):
                             # apply taint analysis to this func
                             # check input args' taints
                             input_args_taint = []
-                            for arg in instr['args']:
-                                if arg in taint_dict:
-                                    input_args_taint.append(taint_dict[arg])
-                                else:
-                                    # if arg is not in taint dict,
-                                    # we assume it is private
-                                    input_args_taint.append('private')
+                            # could be function without args
+                            if 'args' in instr:
+                                for arg in instr['args']:
+                                    if arg in taint_dict:
+                                        input_args_taint.append(taint_dict[arg])
+                                    else:
+                                        # if arg is not in taint dict,
+                                        # we assume it is private
+                                        input_args_taint.append('private')
                             # get the func version
-                            func_match_flag = False
-                            for func_v, dest_taint in func_dict[instr['funcs'][0]][1]:
-                                # check if the input args taints match
-                                if input_args_taint == [arg['type']['taint'] for arg in func_v['args']]:
-                                    func_match_flag = True
-                                    if 'dest' in instr:
-                                        taint_dict[instr['dest']] = dest_taint
-                                    break
-                            if not func_match_flag:
-                                new_func_id = len(func_dict[instr['funcs'][0]][1])
+                            _, _, dest_taint = check_func_args_taint(func_dict, instr['funcs'][0], input_args_taint)
+                            if dest_taint is None:
+                                if DEBUG:
+                                    print(f"No existing version matches, create new version for {input_args_taint}")
                                 # evaluate the func with new input args taints
                                 func_v = copy.deepcopy(func_dict[instr['funcs'][0]][0])
-                                func_v['name'] = f"{instr['funcs'][0]}_{new_func_id}"
-                                for arg_id in range(len(func_v['args'])):
-                                    arg = func_v['args'][arg_id]
-                                    # check if type is dict
-                                    if isinstance(arg['type'], dict):
-                                        arg['type']['taint'] = input_args_taint[arg_id]
-                                    else:
-                                        arg['type'] = {'prim': arg['type'],'taint': input_args_taint[arg_id]}
-                                dest_taint = taint_func(func_v, func_dict, return_prog)
-                                if 'dest' in instr:
-                                    taint_dict[instr['dest']] = dest_taint
-                                func_dict[instr['funcs'][0]][1].append((func_v, dest_taint))
-                                if DEBUG:
-                                    print(f"-----Back Function {fn['name']}-----")
+                                if 'args' in func_v:
+                                    for arg_id in range(len(func_v['args'])):
+                                        arg = func_v['args'][arg_id]
+                                        # check if type is dict
+                                        if isinstance(arg['type'], dict):
+                                            arg['type']['taint'] = input_args_taint[arg_id]
+                                        else:
+                                            arg['type'] = {'prim': arg['type'],'taint': input_args_taint[arg_id]}
+                                # check if this func is already in call stack
+                                if instr['funcs'][0] in func_call_stack:
+                                    if DEBUG:
+                                        print(f"-----Recursion Function {instr['funcs'][0]}-----")
+                                    # if so, we assume it is private
+                                    dest_taint = 'private'
+                                    func_dict[instr['funcs'][0]][1].append([func_v, dest_taint])
+                                    func_dict[instr['funcs'][0]][2].append([False, False])  # not taint ready
+                                    dest_taint = taint_func(func_v, func_dict, return_prog)
+                                    assert write_func_args_taint(func_dict, instr['funcs'][0], input_args_taint, func_v, dest_taint)
+                                else:
+                                    func_call_stack.append(instr['funcs'][0])
+                                    dest_taint = taint_func(func_v, func_dict, return_prog)
+                                    func_call_stack.pop()
+                                    # check if this func is already added by its child
+                                    # if yes, overwrite the return taint
+                                    if not write_func_args_taint(func_dict, instr['funcs'][0], input_args_taint, func_v, dest_taint):
+                                        if DEBUG:
+                                            print(f"Input taint of {instr['funcs'][0]} does not match its child, add new version for {input_args_taint}")
+                                        func_dict[instr['funcs'][0]][1].append([func_v, dest_taint])
+                                        func_dict[instr['funcs'][0]][2].append([False, True]) # taint ready
+                            if 'dest' in instr:
+                                taint_dict[instr['dest']] = dest_taint
+                            if DEBUG:
+                                print(f"-----Back Function {fn['name']}-----")
                         elif instr['op'] == 'load':
                             # conservative approach: if load, we assume it is private
                             taint_dict[instr['dest']] = 'private'
@@ -165,39 +224,58 @@ def taint_func(fn, func_dict, return_prog):
                     worklist.append(succ_id)
 
     # reach fixed point, start updating dest taints
+    # get union of the taint_dict
+    taint_dict_list = []
+    # interate blocks without successors
+    for block_id in range(len(blocks_cfg)):
+        if len(blocks_cfg[block_id]['succ']) == 0:
+            taint_dict_list.append(blocks_cfg[block_id]['out'][0])
+    taint_dict = union_dicts(taint_dict_list)
+    if DEBUG:
+        print(f"-----Start Updating Dest Taints-----")
     for block_id in range(len(blocks_cfg)):
         block = blocks[block_id]
         for instr in block:
             if 'op' in instr:
                 if instr['op'] == 'ret':
-                    if blocks_cfg[block_id]['out'][0][instr['args'][0]] == 'private':
+                    # check if exist ret valuable
+                    if 'args' in instr and blocks_cfg[block_id]['out'][0][instr['args'][0]] == 'private':
                         ret_taint = 'private'
                     continue
                 if instr['op'] == 'call':
                     # check input args' taints
                     input_args_taint = []
-                    for arg in instr['args']:
-                        if arg in taint_dict:
-                            input_args_taint.append(taint_dict[arg])
-                        else:
-                            # if arg is not in taint dict,
-                            # we assume it is private
-                            input_args_taint.append('private')
+                    if 'args' in instr:
+                        for arg in instr['args']:
+                            if arg in taint_dict:
+                                input_args_taint.append(taint_dict[arg])
+                            else:
+                                # if arg is not in taint dict,
+                                # we assume it is private
+                                input_args_taint.append('private')
                     # get the func version
-                    func_match_flag = False
-                    for func_id, (func_v, dest_taint) in enumerate(func_dict[instr['funcs'][0]][1]):
-                        # check if the input args taints match
-                        if input_args_taint == [arg['type']['taint'] for arg in func_v['args']]:
-                            func_match_flag = True
-                            instr['funcs'][0] = f"{instr['funcs'][0]}_{func_id}"
-                            return_prog['functions'].append(copy.deepcopy(func_v))
-                            if 'dest' in instr:
-                                if isinstance(instr.get('type'), dict):
-                                    instr['type']['taint'] = dest_taint
-                                else:
-                                    instr['type'] = {'prim': instr['type'], 'taint': dest_taint}
-                            break
-                    assert func_match_flag  # should have matched
+                    func_id, func_v, dest_taint = check_func_args_taint(func_dict, instr['funcs'][0], input_args_taint)
+                    assert dest_taint is not None
+                    # add matched func to return prog if it is not added yet and its taint is ready
+                    add_flag = func_dict[instr['funcs'][0]][2][func_id][0]
+                    taint_ready_flag = func_dict[instr['funcs'][0]][2][func_id][1]
+                    if DEBUG:
+                        print(f"{func_v['name']} added: {add_flag}, taint ready: {taint_ready_flag}")
+                    if not add_flag and taint_ready_flag:
+                        func_dict[instr['funcs'][0]][2][func_id][0] = True
+                        func_v_copy = copy.deepcopy(func_v)
+                        func_v_copy['name'] = f"{func_v['name']}_{func_id}"
+                        return_prog['functions'].append(func_v_copy)
+                        if DEBUG:
+                            print(f"Add {func_v_copy['name']} to return_prog")
+                    if DEBUG:
+                        print(f"Replace {instr['funcs'][0]} with {instr['funcs'][0]}_{func_id}")
+                    instr['funcs'][0] = f"{instr['funcs'][0]}_{func_id}"
+                    if 'dest' in instr:
+                        if isinstance(instr.get('type'), dict):
+                            instr['type']['taint'] = dest_taint
+                        else:
+                            instr['type'] = {'prim': instr['type'], 'taint': dest_taint}
                     continue
 
                 if 'dest' in instr:

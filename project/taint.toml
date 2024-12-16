@@ -1,10 +1,13 @@
 # which benchmarks to run
 benchmarks = '../benchmarks/core/*.bril'
 # how to extract the performance metric from stderr
-extract = 'total_exec_cycles: (\d+)'
+extract = 'total_misspub: (\d+)'
+# extract = 'total_misspriv: (\d+)'
 
 [runs.baseline]
 pipeline = [
   "python3 bril2json_boru.py",
-  "brili -p {args}",
+  "python3 to_ssa.py",
+  "python3 taint_analysis.py",
+  "brili -p -taint {args}",
 ]

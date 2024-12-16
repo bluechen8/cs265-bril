@@ -3,27 +3,6 @@ import sys
 import copy
 from block_gen import block_gen
 
-COMMUTATIVE_OPS = ['add', 'mul', 'eq']
-BAD_CONST_OPS = ['call', 'ret', 'print', "store", "load", "alloc", "phi"]
-
-def str2bool(arg):
-    if arg.lower() == 'true':
-        return True
-    elif arg.lower() == 'false':
-        return False
-    else:
-        exit(f"Unknown boolean value {arg}")
-
-# print current table
-def print_table(dest2num, val2num, num2dest, num2val):
-    for num in num2val.keys():
-        print(f"{num}: {num2val[num]} | {num2dest[num]}")
-        # test dest2num
-        for dest in num2dest[num]:
-            assert dest2num[dest] == num
-        # test val2num
-        assert val2num[num2val[num]] == num
-
 # pos: if true, ignore empty set
 # loose: if true, include (union) unique keys
 def merge_dicts(dicts, pos=False, loose=False):
@@ -70,14 +49,6 @@ def intersect_sets(sets, pos=False):
             continue
         intersect_items.intersection_update(s)
     return intersect_items
-
-def union_sets(sets):
-    if len(sets) == 0:
-        return set()
-    union_items = set()
-    for s in sets:
-        union_items.update(s)
-    return union_items
 
 # trivial dominator frontier for blocks
 def t_dom_frontier(blocks_cfg):
@@ -219,7 +190,7 @@ def t_to_ssa(fn):
     
                 if DEBUG:
                     print(blocks[join_block])
-    
+
     # iterate blocks to rename uses and complete phi functions
     phi_remove_mode = False
     worklist = [0]
@@ -325,6 +296,8 @@ def t_to_ssa(fn):
                 for _ in range(len(blocks_cfg[succ_id]['pred'])):
                     blocks_cfg[succ_id]['in'].append({})
             if blocks_cfg[succ_id]['in'][blocks_cfg[succ_id]['pred'].index(block_id)] != start_dic:
+                if DEBUG:
+                    print(f"{succ_id} in changed: {blocks_cfg[succ_id]['in'][blocks_cfg[succ_id]['pred'].index(block_id)]}")
                 blocks_cfg[succ_id]['in'][blocks_cfg[succ_id]['pred'].index(block_id)] = start_dic
                 if succ_id not in worklist:
                     worklist.append(succ_id)
@@ -347,251 +320,6 @@ def t_to_ssa(fn):
         blocks[0] = [instr for instr in blocks[0] if 'op' not in instr and 'label' in instr]
     fn["instrs"] = [inst for block in blocks for inst in block]
 
-
-# trivial live variable analysis for one block
-def t_lva_single(block, used_set):
-    if DEBUG:
-        print(f"initial used_set: {used_set}")
-    # iterate inst in one local block (reverse order)
-    for inst_idx in reversed(range(len(block))):
-        inst = block[inst_idx]
-        if DEBUG:
-            print(f"[+] inst dut: {inst}")
-        # check dest variable
-        # new definition -> clear used_set
-        dest = inst.get('dest')
-        if dest is not None:
-            used_set.discard(dest)
-            if DEBUG:
-                print(f"[++] discard {dest}")
-        # check args variables
-        # args -> used -> add to used_set
-        if 'args' in inst:
-            for arg in inst['args']:
-                used_set.add(arg)
-                if DEBUG:
-                    print(f"[++] add {arg}")
-    return used_set
-
-# trivial local dead code elimination for one block
-def l_dce_single(block, used_set):
-    # delete inst list
-    del_list = []
-    # interate inst in one local block
-    for inst_idx in reversed(range(len(block))):
-        inst = block[inst_idx]
-        # ignore labels
-        if 'op' in inst:
-            # process dest
-            dest = inst.get('dest')
-            if dest is not None:
-                if dest not in used_set:
-                    del_list.append(inst_idx)
-                else:
-                    used_set.remove(dest)
-            # process args
-            if inst_idx in del_list:
-                continue
-            if 'args' in inst:
-                for arg in inst["args"]:
-                    used_set.add(arg)
-
-    block = [inst for idx, inst in enumerate(block) if idx not in del_list]
-    return block, used_set
-
-# trivial live variable analysis
-def t_lva(fn):
-    # interate blocks
-    blocks, blocks_cfg = block_gen(fn, dummy=False)
-    # initialize in and out table
-    for block in blocks_cfg:
-        for _ in range(len(block['succ'])):
-            block['out'].append(set())
-        block['in'].append(set())
-    # initialize worklist
-    worklist = []
-    for block_idx in range(len(blocks_cfg)):
-        block = blocks_cfg[block_idx]
-        if len(block['succ']) == 0:
-            worklist.append(block_idx)
-
-    # big while loop containing both lva and dce
-    dce_mode = False
-    while len(worklist) > 0 or not dce_mode:
-        # check worklist length
-        if len(worklist) == 0:
-            # liveness analysis done, start dce
-            dce_mode = True
-            # add all nodes
-            for block_idx in range(len(blocks_cfg)):
-                worklist.append(block_idx)
-
-        block_id = worklist.pop()
-
-        if DEBUG:
-            print(f"-----Block {block_id}-----")
-            print(f"out: {blocks_cfg[block_id]['out']}")
-
-        # liveness or dce analysis
-        if not dce_mode:
-            used_set = t_lva_single(blocks[block_id], union_sets(blocks_cfg[block_id]['out']))
-        else:
-            blocks[block_id], used_set = l_dce_single(blocks[block_id], union_sets(blocks_cfg[block_id]['out']))
-        if DEBUG:
-            print(f"used_set: {used_set}")
-        blocks_cfg[block_id]['touch'] += 1
-        # if in changed, update pred
-        if used_set != blocks_cfg[block_id]['in'][0]:
-            for pred_id in blocks_cfg[block_id]['pred']:
-                if pred_id not in worklist:
-                    worklist.append(pred_id)
-                blocks_cfg[pred_id]['out'][blocks_cfg[pred_id]['succ'].index(block_id)] = used_set
-            blocks_cfg[block_id]['in'][0] = used_set
-        else:
-            # if pred has not been touched, add to worklist
-            for pred_id in blocks_cfg[block_id]['pred']:
-                if pred_id not in worklist and blocks_cfg[pred_id]['touch'] == 0:
-                    worklist.append(pred_id)
-        if DEBUG:
-            print(f"worklist: {worklist}")
-            print('-------------------------')
-
-    fn["instrs"] = [inst for block in blocks for inst in block]
-
-# trivial local value numbering for one block
-def t_lvn_single(block):
-    # declare table
-    dest2num = {}
-    val2num = {}
-    num2dest = {}
-    num2val = {}
-    global_num = 0
-
-    # iterate inst in one local block
-    for inst_idx in range(len(block)):
-        inst = block[inst_idx]
-        dest = inst.get('dest')
-        # flags
-        all_const_flag = True
-        # ignore labels
-        if 'op' in inst:
-            if DEBUG:
-                print(inst)
-            # ignore float
-            if 'type' in inst and inst['type'] == 'float':
-                continue
-            if inst['op'] in BAD_CONST_OPS:
-                continue
-            if dest is None:
-                continue
-            # check if has args
-            if 'args' in inst or 'value' in inst:
-                if 'value' in inst:
-                    args = [str(inst['value'])]
-                    all_const_flag = False
-                else:  # 'args' in inst
-                    args = [str(dest2num[arg]) if dest2num.get(arg) is not None \
-                        else arg for arg in inst['args']]
-                    args = []
-                    for arg in inst['args']:
-                        argnum = dest2num.get(arg)
-                        if argnum is not None:
-                            if 'const' in num2val[argnum]:
-                                args.append(num2val[argnum].split(' ')[1])
-                                continue
-                            else:
-                                args.append(str(argnum))
-                        else:
-                            args.append(arg)
-                        all_const_flag = False
-
-                # construct value
-                # if all const, then compute it
-                if all_const_flag:
-                    match inst['op']:
-                        case 'const':
-                            value = int(args[0]) if inst['type'] == 'int' else str2bool(args[0])
-                        case 'add':
-                            value = int(args[0]) + int(args[1])
-                        case 'sub':
-                            value = int(args[0]) - int(args[1])
-                        case 'mul':
-                            value = int(args[0]) * int(args[1])
-                        case 'div':
-                            value = int(args[0]) // int(args[1])
-                        case 'id':
-                            value = int(args[0]) if inst['type'] == 'int' else str2bool(args[0])
-                        case 'and':
-                            value = str2bool(args[0]) and str2bool(args[1])
-                        case 'or':
-                            value = str2bool(args[0]) or str2bool(args[1])
-                        case 'not':
-                            value = not str2bool(args[0])
-                        case 'eq':
-                            value = int(args[0]) == int(args[1])
-                        case 'le':
-                            value = int(args[0]) <= int(args[1])
-                        case 'lt':
-                            value = int(args[0]) < int(args[1])
-                        case 'ge':
-                            value = int(args[0]) >= int(args[1])
-                        case 'gt':
-                            value = int(args[0]) > int(args[1])
-                        case 'ne':
-                            value = int(args[0]) != int(args[1])
-                        case _:
-                            exit(f"Unknown operator {inst['op']}")
-                    inst['op'] = 'const'
-                    inst.pop('args', None)
-                    inst['value'] = value
-                    value = 'const ' + str(value)
-                else:
-                    if inst['op'] in COMMUTATIVE_OPS:
-                        args.sort()
-                    if inst['op'] == 'id':
-                        value = args[0]
-                    else:
-                        value = inst['op'] + ' ' + ' '.join(args)
-                if DEBUG:
-                    print(f"Compute the value {value}")
-
-                # search for common value
-                if inst['op'] == 'id' and value.isdecimal():
-                    num = int(value)
-                else:
-                    num = val2num.get(value)
-                if DEBUG:
-                    print(f"Matched num: {num}")
-                if num is None:
-                    # add new num
-                    val2num[value] = global_num
-                    dest2num[dest] = global_num
-                    num2dest[global_num] = [dest]
-                    num2val[global_num] = value
-                    global_num += 1
-                else:
-                    if DEBUG:
-                        print(f"Replace {dest} with {num}")
-                    inst['args'] = [num2dest[num][0]]
-                    inst['op'] = 'id'
-                    dest2num[dest] = num
-                    num2dest[num].append(dest)
-            if DEBUG:
-                print_table(dest2num, val2num, num2dest, num2val)
-                print('-------------------------')
-    return block
-
-# trivial local value numbering
-def t_lvn(fn):
-    # interate blocks
-    blocks, _ = block_gen(fn, dummy=False)
-    for block_id in range(len(blocks)):
-        if DEBUG:
-            print(f"-----Block {block_id}-----")
-        blocks[block_id] = t_lvn_single(blocks[block_id])
-    fn["instrs"] = [inst for block in blocks for inst in block]
-
-
 if __name__ == "__main__":
     DEBUG = False
     prog = json.load(sys.stdin)
@@ -601,18 +329,6 @@ if __name__ == "__main__":
         if DEBUG:
             print(f"-----Function {fn['name']}-----")
         t_to_ssa(fn)
-
-    # local load value numbering
-    for fn in prog["functions"]:
-        if DEBUG:
-            print(f"-----Function {fn['name']}-----")
-        t_lvn(fn)
-
-    # liveness and dce
-    for fn in prog["functions"]:
-        if DEBUG:
-            print(f"-----Function {fn['name']}-----")
-        t_lva(fn)
 
     # Output the program
     if not DEBUG:
