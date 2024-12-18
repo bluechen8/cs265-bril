@@ -4,7 +4,17 @@ import copy
 from block_gen import block_gen
 
 NO_ARGS_INST = ['nop', 'ret', 'jmp', 'br', 'const']
+BAD_CONST_OPS = ['call']
 func_call_stack = []
+
+def values_equality_check(values):
+    if len(values) <= 1:
+        return True
+    else:
+        for i in range(1, len(values)):
+            if values[i] != values[0]:
+                return False
+        return True
 
 def union_dicts(dicts):
     if len(dicts) == 0:
@@ -54,6 +64,146 @@ def write_func_args_taint(func_dict, func_name, args_taint, correct_func_v, corr
                 func_dict[func_name][2][func_id][1] = True
                 return True
         return False
+    
+# trivial constant analysis for one block
+def t_cpf_single(block, dest2val):
+    if DEBUG:
+        print(f"Block start: {dest2val}")
+    # iterate inst in one local block
+    for instr_idx in range(len(block)):
+        instr = block[instr_idx]
+        dest = instr.get('dest')
+
+        # flags
+        all_const_flag = True
+        const_value_flag = False
+
+        # extract constant depending on the operator
+        if 'op' in instr and instr['op'] not in BAD_CONST_OPS:
+            # check if has args
+            if 'args' in instr or 'value' in instr:
+                if 'value' in instr:
+                    assert instr['op'] == 'const'
+                    values = [instr['value']]
+                else:
+                    values = []
+                    for arg in instr['args']:
+                        if arg in dest2val:
+                            values.append(dest2val[arg])
+                        else:
+                            if arg == instr.get('dest'):
+                                # since the input program is SSA, only phi func could have dest as arg
+                                assert instr['op'] == 'phi'
+                                continue 
+                            all_const_flag = False
+                            break
+            else:
+                # pass if no args
+                continue
+            # compute dest value
+            value = 0
+            if all_const_flag and dest is not None:
+                const_value_flag = True
+                match instr['op']:
+                    case 'const':
+                        value = values[0]
+                    case 'add' | 'fadd' | 'fadd_ct':
+                        value = values[0] + values[1]
+                    case 'sub' | 'fsub' | 'fsub_ct':
+                        value = values[0] - values[1]
+                    case 'mul' | 'mul_ct' | 'fmul' | 'fmul_ct':
+                        value = values[0] * values[1]
+                    case 'div' | 'div_ct' | 'fdiv' | 'fdiv_ct':
+                        value = values[0] // values[1]
+                    case 'id':
+                        value = values[0]
+                    case 'and':
+                        value = values[0] and values[1]
+                    case 'or':
+                        value = values[0] or values[1]
+                    case 'not':
+                        value = not values[0]
+                    case 'eq' | 'feq' | 'feq_ct' | 'ceq':
+                        value = values[0] == values[1]
+                    case 'le' | 'fle' | 'fle_ct' | 'cle':
+                        value = values[0] <= values[1]
+                    case 'lt' | 'flt' | 'flt_ct' | 'clt':
+                        value = values[0] < values[1]
+                    case 'ge' | 'fge' | 'fge_ct' | 'cge':
+                        value = values[0] >= values[1]
+                    case 'gt' | 'fgt' | 'fgt_ct' | 'cgt':
+                        value = values[0] > values[1]
+                    case 'phi':
+                        if values_equality_check(values):
+                            value = values[0]
+                        else:
+                            const_value_flag = False
+                    case _:
+                        # exit(f"Unknown operator {instr['op']}")
+                        pass
+            else:
+                if len(values) == 2 and 'args' in instr and instr['args'][0] == instr['args'][1]:
+                    match instr['op']:
+                        case 'eq' | 'feq' | 'feq_ct' | 'ceq':
+                            value = True
+                            const_value_flag = True
+                        case 'le' | 'fle' | 'fle_ct' | 'cle':
+                            value = True
+                            const_value_flag = True
+                        case 'lt' | 'flt' | 'flt_ct' | 'clt':
+                            value = False
+                            const_value_flag = True
+                        case 'ge' | 'fge' | 'fge_ct' | 'cge':
+                            value = True
+                            const_value_flag = True
+                        case 'gt' | 'fgt' | 'fgt_ct' | 'cgt':
+                            value = False
+                            const_value_flag = True
+                        case _:
+                            pass
+
+            # check and dest value
+            if dest is not None and const_value_flag:
+                dest2val[dest] = value
+    if DEBUG:
+        print(f"Block end: {dest2val}")
+    return dest2val
+
+def t_cpf(fn):
+    # interate blocks
+    blocks, blocks_cfg = block_gen(fn)
+    # initialize in and out table
+    for block in blocks_cfg:
+        for _ in range(len(block['pred'])):
+            block['in'].append({})
+        block['out'].append({})
+    # initialize worklist
+    worklist = [0]
+    while len(worklist) > 0:
+        block_id = worklist.pop()
+        dest2val = t_cpf_single(blocks[block_id], union_dicts(blocks_cfg[block_id]['in']))
+        blocks_cfg[block_id]['touch'] += 1
+        # if out changed, update succ
+        if dest2val != blocks_cfg[block_id]['out'][0]:
+            for succ_id in blocks_cfg[block_id]['succ']:
+                if succ_id not in worklist:
+                    worklist.append(succ_id)
+                blocks_cfg[succ_id]['in'][blocks_cfg[succ_id]['pred'].index(block_id)] = dest2val
+            blocks_cfg[block_id]['out'][0] = dest2val
+        else:
+            # if succ has not been touched, add to worklist
+            for succ_id in blocks_cfg[block_id]['succ']:
+                if succ_id not in worklist and blocks_cfg[succ_id]['touch'] == 0:
+                    worklist.append(succ_id)
+
+    # get union of the taint_dict
+    const_dict_list = []
+    # interate blocks without successors
+    for block_id in range(len(blocks_cfg)):
+        if len(blocks_cfg[block_id]['succ']) == 0:
+            const_dict_list.append(blocks_cfg[block_id]['out'][0])
+    const_dict = union_dicts(const_dict_list)
+    return const_dict
 
 def taint_analysis(prog):
     return_prog = {"functions": []}
@@ -91,6 +241,15 @@ def taint_analysis(prog):
 def taint_func(fn, func_dict, return_prog):
     if DEBUG:
         print(f"-----Function {fn['name']}-----")
+    # constant analysis
+    const_dict = {}
+    if CONSTANT_ANALYSIS:
+        if DEBUG:
+            print(f"-----Constant Analysis-----")
+        const_dict = t_cpf(fn)
+        if DEBUG:
+            print(f"-----Constant Analysis Result: {const_dict}-----")
+    # start taint analysis
     ret_taint = 'public'  # return taint
     blocks, blocks_cfg = block_gen(fn, dummy=False)
     # initialize
@@ -127,7 +286,11 @@ def taint_func(fn, func_dict, return_prog):
                     # check if the taint of dest is already specify
                     if isinstance(instr.get('type'), dict) and 'taint' in instr['type']:
                         taint_dict[instr['dest']] = instr['type']['taint']
+                    elif 'dest' in instr and instr['dest'] in const_dict:
+                        # if dest can be determined by constant analysis, then it should be public
+                        taint_dict[instr['dest']] = 'public'
                     else:
+                        # TODO: consider mul, mul_ct, and, or for more constant analysis opt
                         # check if the op is call
                         if instr['op'] == 'call':
                             # apply taint analysis to this func
@@ -289,6 +452,10 @@ def taint_func(fn, func_dict, return_prog):
 
 if __name__ == '__main__':
     DEBUG = False
+    CONSTANT_ANALYSIS = True
+    MEMORY_ALIAS = False
+    CODE_TRANSFORM = False
+
     prog = json.load(sys.stdin)
 
     prog = taint_analysis(prog)
